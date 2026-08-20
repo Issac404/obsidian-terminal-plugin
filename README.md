@@ -1,10 +1,11 @@
 # Terminal Commands
 
-Terminal Commands is a desktop-only Obsidian plugin for opening a vault in a terminal and launching configurable shell commands from the command palette.
+Terminal Commands is a desktop-only Obsidian plugin for opening a vault in a terminal and launching configurable shell commands from the command palette or a searchable ribbon menu.
 
 ## Features
 
 - Open the current vault in a configured terminal application.
+- Open a searchable command menu from the left ribbon, with each command's working directory and shell command shown beneath its name.
 - Manage commands in one compact five-column table.
 - Edit each command's palette name, shell command, and working directory.
 - Automatically register commands whose name and shell command are not empty.
@@ -19,8 +20,7 @@ New installations include editable entries for:
 
 - Claude Code
 - Codex CLI
-- Cursor CLI
-- Gemini CLI
+- Antigravity
 - OpenCode
 - Git pull
 - Git commit and push
@@ -74,12 +74,12 @@ Then reload Obsidian and enable **Terminal Commands** under Community plugins.
 
 ## Author
 
-[sontara](https://github.com/sontarakumar313-netizen)
+[Issac404](https://github.com/Issac404)
 
 ## Repository
 
-[sontarakumar313-netizen/obsidian-terminal-plugin](https://github.com/sontarakumar313-netizen/obsidian-terminal-plugin)
+[Issac404/obsidian-terminal-plugin](https://github.com/Issac404/obsidian-terminal-plugin)
 
 ## License
 
-MIT
+[MIT](LICENSE)
