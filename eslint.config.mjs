@@ -69,7 +69,6 @@ export default [
             "Cursor cli",
             "Gemini cli",
             "Git",
-            "WSL",
             "Windows",
           ],
         },

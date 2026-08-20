@@ -12,7 +12,6 @@ Terminal Commands is a desktop-only Obsidian plugin for opening a vault in a ter
 - Delete commands through an Obsidian confirmation dialog.
 - Start commands at the vault root or the active note's folder.
 - Use platform-specific launch behavior on Windows, macOS, and Linux.
-- Optionally launch commands through WSL on Windows.
 
 ## Initial commands
 
@@ -36,7 +35,6 @@ The settings page contains:
 
 - **Terminal application name** — terminal executable or application used for launches.
 - **Reuse existing Terminal instance** — macOS-only option controlling `open -a` versus `open -na`.
-- **Use WSL for commands** — Windows-only option for launching commands inside WSL.
 - **Commands** — an ordered table containing:
   - Drag handle
   - Command palette name
@@ -55,7 +53,7 @@ Git entries are ordinary shell commands and do not receive a separate repository
 ## Platform behavior
 
 - **macOS** — opens the configured terminal with `open`; command launches use a temporary executable `.command` script.
-- **Windows** — supports `cmd.exe`, PowerShell, Windows Terminal, custom terminal executables, and optional WSL launches.
+- **Windows** — supports `cmd.exe`, PowerShell, Windows Terminal, and custom terminal executables.
 - **Linux / BSD** — launches the configured terminal directly or uses `bash -lc` when running a command.
 
 ## Development

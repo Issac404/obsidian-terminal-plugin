@@ -21,7 +21,6 @@ export interface TerminalCommandsSettings {
   terminalApp: TerminalAppByPlatform;
   reuseExistingMacApp: boolean;
   commands: CommandSettings[];
-  enableWslOnWindows: boolean;
 }
 
 type UnknownRecord = Record<string, unknown>;
@@ -112,8 +111,7 @@ const cloneDefaultCommands = (): CommandSettings[] =>
 export const DEFAULT_SETTINGS: TerminalCommandsSettings = {
   terminalApp: buildDefaultTerminalAppSetting(),
   reuseExistingMacApp: true,
-  commands: cloneDefaultCommands(),
-  enableWslOnWindows: false
+  commands: cloneDefaultCommands()
 };
 
 const isRecord = (value: unknown): value is UnknownRecord =>
@@ -211,11 +209,7 @@ export const normalizeSettings = (stored: unknown): TerminalCommandsSettings => 
       source.reuseExistingMacApp,
       DEFAULT_SETTINGS.reuseExistingMacApp
     ),
-    commands: normalizeCommands(source.commands),
-    enableWslOnWindows: readBoolean(
-      source.enableWslOnWindows,
-      DEFAULT_SETTINGS.enableWslOnWindows
-    )
+    commands: normalizeCommands(source.commands)
   };
 };
 

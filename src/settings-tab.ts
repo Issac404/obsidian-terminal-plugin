@@ -113,17 +113,6 @@ export class TerminalCommandsSettingTab extends PluginSettingTab {
         );
     }
 
-    if (Platform.isWin) {
-      new Setting(containerEl)
-        .setName('Use WSL for commands')
-        .setDesc('Run commands inside WSL on Windows.')
-        .addToggle((toggle) =>
-          toggle.setValue(this.plugin.settings.enableWslOnWindows).onChange(async (value) => {
-            this.plugin.settings.enableWslOnWindows = value;
-            await this.plugin.saveSettings();
-          })
-        );
-    }
   }
 
   private displayCommands(containerEl: HTMLElement): void {

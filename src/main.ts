@@ -81,7 +81,6 @@ export default class TerminalCommandsPlugin extends Plugin {
     const launchPath = this.getLaunchPath(vaultPath, workingDirectory);
     const terminalApp = getCurrentTerminalApp(this.settings.terminalApp);
     const launchCommand = buildLaunchCommand(terminalApp, launchPath, toolCommand, {
-      useWslOnWindows: this.settings.enableWslOnWindows,
       reuseExistingMacApp: this.settings.reuseExistingMacApp
     });
     logger.log('Compose launch command', {

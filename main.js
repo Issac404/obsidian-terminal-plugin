@@ -99,17 +99,6 @@ const logger = {
 
 const sanitizeTerminalApp = (value) => value.trim();
 const escapeDoubleQuotes = (value) => value.replace(/"/g, '\\"');
-const escapeForCmdQuotedString = (value) => value.replace(/"/g, '""');
-const toWslPath = (windowsPath) => {
-    const normalized = windowsPath.replace(/\\/g, '/');
-    const match = normalized.match(/^([A-Za-z]):\/(.*)$/);
-    if (!match) {
-        return null;
-    }
-    const drive = match[1].toLowerCase();
-    const rest = match[2];
-    return `/mnt/${drive}/${rest}`;
-};
 const getPlatformSummary = () => {
     if (obsidian.Platform.isDesktopApp) {
         if (obsidian.Platform.isMacOS) {
@@ -174,7 +163,7 @@ const buildMacLaunch = (terminalApp, vaultPath, toolCommand, options) => {
     logger.log('macOS script launch', { app, command, script: path, toolCommand });
     return { command, cwd: vaultPath, cleanup };
 };
-const buildWindowsLaunch = (terminalApp, vaultPath, toolCommand, useWslOnWindows) => {
+const buildWindowsLaunch = (terminalApp, vaultPath, toolCommand) => {
     const app = sanitizeTerminalApp(terminalApp);
     if (!app) {
         return null;
@@ -183,49 +172,6 @@ const buildWindowsLaunch = (terminalApp, vaultPath, toolCommand, useWslOnWindows
     const cdCommand = `cd /d "${escapedVault}"`;
     const tool = toolCommand ? ` && ${toolCommand}` : '';
     const lowerApp = app.toLowerCase();
-    if (useWslOnWindows) {
-        const wslVaultPath = toWslPath(vaultPath);
-        if (!wslVaultPath) {
-            logger.log('Windows WSL launch skipped due to unsupported path', { vaultPath });
-            return null;
-        }
-        const wslPrefix = `wsl.exe --cd "${escapeForCmdQuotedString(wslVaultPath)}"`;
-        const wslCommand = toolCommand ? `${wslPrefix} ${toolCommand}` : wslPrefix;
-        if (lowerApp === 'cmd.exe' || lowerApp === 'cmd') {
-            const command = `start "" cmd.exe /K "${wslCommand}"`;
-            logger.log('Windows launch (cmd.exe + WSL)', { command, toolCommand, vaultPath, wslVaultPath });
-            return { command, cwd: vaultPath };
-        }
-        if (lowerApp === 'powershell' || lowerApp === 'powershell.exe') {
-            const psWslPath = wslVaultPath.replace(/'/g, "''");
-            const psCommand = toolCommand
-                ? `start "" powershell -NoExit -Command "wsl.exe --cd '${psWslPath}' ${toolCommand}"`
-                : `start "" powershell -NoExit -Command "wsl.exe --cd '${psWslPath}'"`;
-            logger.log('Windows launch (powershell + WSL)', {
-                command: psCommand,
-                toolCommand,
-                vaultPath,
-                wslVaultPath
-            });
-            return { command: psCommand, cwd: vaultPath };
-        }
-        if (lowerApp === 'wt.exe' || lowerApp === 'wt') {
-            const command = toolCommand
-                ? `start "" wt.exe new-tab wsl.exe --cd "${escapeForCmdQuotedString(wslVaultPath)}" ${toolCommand}`
-                : `start "" wt.exe new-tab wsl.exe --cd "${escapeForCmdQuotedString(wslVaultPath)}"`;
-            logger.log('Windows launch (wt + WSL)', { command, toolCommand, vaultPath, wslVaultPath });
-            return { command, cwd: vaultPath };
-        }
-        const command = `start "" cmd.exe /K "${wslCommand}"`;
-        logger.log('Windows launch (generic + WSL fallback)', {
-            command,
-            app,
-            toolCommand,
-            vaultPath,
-            wslVaultPath
-        });
-        return { command, cwd: vaultPath };
-    }
     if (lowerApp === 'cmd.exe' || lowerApp === 'cmd') {
         const command = toolCommand
             ? `start "" cmd.exe /K "${cdCommand}${tool}"`
@@ -292,7 +238,7 @@ const buildLaunchCommand = (terminalApp, vaultPath, toolCommand, options) => {
         return buildMacLaunch(terminalApp, vaultPath, toolCommand, options);
     }
     if (obsidian.Platform.isWin) {
-        return buildWindowsLaunch(terminalApp, vaultPath, toolCommand, options === null || options === void 0 ? void 0 : options.useWslOnWindows);
+        return buildWindowsLaunch(terminalApp, vaultPath, toolCommand);
     }
     return buildUnixLaunch(terminalApp, vaultPath, toolCommand);
 };
@@ -377,8 +323,7 @@ const cloneDefaultCommands = () => DEFAULT_COMMANDS.map((command) => (Object.ass
 const DEFAULT_SETTINGS = {
     terminalApp: buildDefaultTerminalAppSetting(),
     reuseExistingMacApp: true,
-    commands: cloneDefaultCommands(),
-    enableWslOnWindows: false
+    commands: cloneDefaultCommands()
 };
 const isRecord = (value) => typeof value === 'object' && value !== null;
 const normalizeTerminalAppSetting = (value, fallback) => {
@@ -456,8 +401,7 @@ const normalizeSettings = (stored) => {
     return {
         terminalApp: normalizeTerminalAppSetting(source.terminalApp, DEFAULT_SETTINGS.terminalApp),
         reuseExistingMacApp: readBoolean(source.reuseExistingMacApp, DEFAULT_SETTINGS.reuseExistingMacApp),
-        commands: normalizeCommands(source.commands),
-        enableWslOnWindows: readBoolean(source.enableWslOnWindows, DEFAULT_SETTINGS.enableWslOnWindows)
+        commands: normalizeCommands(source.commands)
     };
 };
 const getCurrentTerminalApp = (terminalApp) => {
@@ -543,15 +487,6 @@ class TerminalCommandsSettingTab extends obsidian.PluginSettingTab {
                 .setDesc('Use macOS open -a to reuse the configured Terminal app. Turn this off to launch a new instance.')
                 .addToggle((toggle) => toggle.setValue(this.plugin.settings.reuseExistingMacApp).onChange((value) => __awaiter(this, void 0, void 0, function* () {
                 this.plugin.settings.reuseExistingMacApp = value;
-                yield this.plugin.saveSettings();
-            })));
-        }
-        if (obsidian.Platform.isWin) {
-            new obsidian.Setting(containerEl)
-                .setName('Use WSL for commands')
-                .setDesc('Run commands inside WSL on Windows.')
-                .addToggle((toggle) => toggle.setValue(this.plugin.settings.enableWslOnWindows).onChange((value) => __awaiter(this, void 0, void 0, function* () {
-                this.plugin.settings.enableWslOnWindows = value;
                 yield this.plugin.saveSettings();
             })));
         }
@@ -908,7 +843,6 @@ class TerminalCommandsPlugin extends obsidian.Plugin {
         const launchPath = this.getLaunchPath(vaultPath, workingDirectory);
         const terminalApp = getCurrentTerminalApp(this.settings.terminalApp);
         const launchCommand = buildLaunchCommand(terminalApp, launchPath, toolCommand, {
-            useWslOnWindows: this.settings.enableWslOnWindows,
             reuseExistingMacApp: this.settings.reuseExistingMacApp
         });
         logger.log('Compose launch command', {
