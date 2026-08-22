@@ -1,13 +1,27 @@
-import { App, Modal, Platform, Plugin, PluginSettingTab, Setting, setIcon } from 'obsidian';
+import { webUtils } from 'electron';
+import {
+  App,
+  ButtonComponent,
+  Modal,
+  Notice,
+  Platform,
+  Plugin,
+  PluginSettingTab,
+  Setting,
+  type SettingDefinitionItem,
+  type SettingDefinitionList
+} from 'obsidian';
 
+import { isSupportedWindowsTerminalApp } from './launcher';
 import {
   createCommand,
-  defaultTerminalApp,
+  createTerminalProfile,
   getCurrentTerminalApp,
+  restoreDefaultTerminalProfiles,
   setCurrentTerminalApp,
   type CommandSettings,
   type TerminalCommandsSettings,
-  type WorkingDirectoryMode
+  type TerminalProfile
 } from './settings';
 
 type SettingsHost = Plugin & {
@@ -16,20 +30,22 @@ type SettingsHost = Plugin & {
 };
 
 const SAVE_DELAY_MS = 250;
+const TERMINAL_DROPDOWN_WIDTH = '112px';
 
-class DeleteCommandModal extends Modal {
+class DeleteItemModal extends Modal {
   constructor(
     app: App,
-    private readonly commandName: string,
+    private readonly itemType: 'command' | 'terminal',
+    private readonly itemName: string,
     private readonly confirmDelete: () => void
   ) {
     super(app);
   }
 
   onOpen(): void {
-    this.setTitle('Delete command');
+    this.setTitle(`Delete ${this.itemType}`);
     this.contentEl.createEl('p', {
-      text: `Delete "${this.commandName}"? This action cannot be undone.`
+      text: `Delete "${this.itemName}"? This action cannot be undone.`
     });
 
     const actions = new Setting(this.contentEl);
@@ -41,7 +57,7 @@ class DeleteCommandModal extends Modal {
     actions.addButton((button) =>
       button
         .setButtonText('Delete')
-        .setWarning()
+        .setDestructive()
         .onClick(() => {
           this.close();
           this.confirmDelete();
@@ -54,11 +70,45 @@ class DeleteCommandModal extends Modal {
   }
 }
 
+class RestoreTerminalsModal extends Modal {
+  constructor(
+    app: App,
+    private readonly confirmRestore: () => void
+  ) {
+    super(app);
+  }
+
+  onOpen(): void {
+    this.setTitle('Restore default terminals');
+    this.contentEl.createEl('p', {
+      text: 'Replace the terminal list with the platform defaults? Custom terminals will be removed, and their commands will use the first default terminal.'
+    });
+
+    const actions = new Setting(this.contentEl);
+    actions.settingEl.addClass('terminal-commands-delete-actions');
+    actions.addButton((button) => {
+      button.setButtonText('Cancel').onClick(() => this.close());
+      button.buttonEl.focus();
+    });
+    actions.addButton((button) =>
+      button
+        .setButtonText('Restore')
+        .setDestructive()
+        .onClick(() => {
+          this.close();
+          this.confirmRestore();
+        })
+    );
+  }
+
+  onClose(): void {
+    this.contentEl.empty();
+  }
+}
+
 export class TerminalCommandsSettingTab extends PluginSettingTab {
   plugin: SettingsHost;
-  private draggedCommandId: string | null = null;
-  private dropIndicatorRow: HTMLTableRowElement | null = null;
-  private dropTargetIndex: number | null = null;
+  private commandListObserver: MutationObserver | null = null;
   private saveTimer: number | null = null;
 
   constructor(app: App, plugin: SettingsHost) {
@@ -66,358 +116,516 @@ export class TerminalCommandsSettingTab extends PluginSettingTab {
     this.plugin = plugin;
   }
 
-  display(): void {
-    const { containerEl } = this;
-    containerEl.empty();
-    this.displayGeneralSettings(containerEl);
-    this.displayCommands(containerEl);
+  getSettingDefinitions(): SettingDefinitionItem[] {
+    const definitions: SettingDefinitionItem[] = [];
+    if (Platform.isMacOS) {
+      definitions.push({
+        type: 'group',
+        heading: 'Terminal integration',
+        items: [
+          {
+            name: 'Reuse existing terminal instance',
+            desc: 'Reuse the configured macOS terminal app instead of launching a new instance.',
+            visible: Platform.isMacOS,
+            control: {
+              type: 'toggle',
+              key: 'reuseExistingMacApp'
+            }
+          }
+        ]
+      });
+    }
+    definitions.push(
+      this.getTerminalDefinitions(),
+      this.getCommandDefinitions()
+    );
+    this.observeCommandList();
+    return definitions;
   }
 
   hide(): void {
     this.flushScheduledSave();
-    this.clearDragState();
   }
 
-  private displayGeneralSettings(containerEl: HTMLElement): void {
-    new Setting(containerEl).setName('Terminal integration').setHeading();
-
-    new Setting(containerEl)
-      .setName('Terminal application name')
-      .setDesc(
-        'Enter the command line app to launch, such as the default shell or a custom executable path.'
-      )
-      .addText((text) =>
-        text
-          .setPlaceholder(defaultTerminalApp())
-          .setValue(getCurrentTerminalApp(this.plugin.settings.terminalApp))
-          .onChange(async (value) => {
-            this.plugin.settings.terminalApp = setCurrentTerminalApp(
-              this.plugin.settings.terminalApp,
-              value
-            );
-            await this.plugin.saveSettings();
-          })
-      );
-
-    if (Platform.isMacOS) {
-      new Setting(containerEl)
-        .setName('Reuse existing Terminal instance')
-        .setDesc(
-          'Use macOS open -a to reuse the configured Terminal app. Turn this off to launch a new instance.'
-        )
-        .addToggle((toggle) =>
-          toggle.setValue(this.plugin.settings.reuseExistingMacApp).onChange(async (value) => {
-            this.plugin.settings.reuseExistingMacApp = value;
-            await this.plugin.saveSettings();
-          })
-        );
-    }
-
+  dispose(): void {
+    this.commandListObserver?.disconnect();
+    this.commandListObserver = null;
+    this.flushScheduledSave();
   }
 
-  private displayCommands(containerEl: HTMLElement): void {
-    new Setting(containerEl)
-      .setName('Commands')
-      .setHeading()
-      .addButton((button) =>
-        button
-          .setButtonText('Add command')
-          .setCta()
-          .onClick(async () => {
-            this.plugin.settings.commands.push(createCommand(this.plugin.settings.commands));
-            await this.saveImmediately();
-            this.display();
-          })
-      );
-
-    const scrollEl = containerEl.createDiv({ cls: 'terminal-commands-command-table-scroll' });
-    const tableEl = scrollEl.createEl('table', { cls: 'terminal-commands-command-table' });
-    this.displayColumnWidths(tableEl);
-
-    const headerRow = tableEl.createEl('thead').createEl('tr');
-    this.createHeaderCell(headerRow, '', 'Drag handle');
-    this.createHeaderCell(headerRow, 'Name');
-    this.createHeaderCell(headerRow, 'Command');
-    this.createHeaderCell(headerRow, 'Working directory');
-    this.createHeaderCell(headerRow, '', 'Delete command');
-
-    const bodyEl = tableEl.createEl('tbody');
-    this.attachTableBodyDropEvents(bodyEl);
-
-    if (this.plugin.settings.commands.length === 0) {
-      const emptyCell = bodyEl.createEl('tr').createEl('td', {
-        cls: 'terminal-commands-empty-state',
-        text: 'No commands. Add a command to create a command palette entry.'
-      });
-      emptyCell.colSpan = 5;
-      return;
-    }
-
-    this.plugin.settings.commands.forEach((command, index) => {
-      this.displayCommandRow(bodyEl, command, index);
-    });
+  private getTerminalDefinitions(): SettingDefinitionList {
+    return {
+      type: 'list',
+      heading: 'Terminals',
+      cls: 'terminal-commands-terminals-list',
+      emptyState: 'At least one terminal is required.',
+      addItem: {
+        name: 'Add terminal',
+        action: () => {
+          void this.addTerminal();
+        }
+      },
+      onDelete: (index) => {
+        const terminal = this.plugin.settings.terminals[index];
+        if (terminal) {
+          this.confirmTerminalDelete(terminal, index);
+        }
+      },
+      items: this.plugin.settings.terminals.map((terminal, index) => ({
+        name: terminal.id,
+        searchable: false,
+        render: (setting) => {
+          this.renderTerminalControls(setting, terminal, index);
+        }
+      }))
+    };
   }
 
-  private displayColumnWidths(tableEl: HTMLTableElement): void {
-    const colgroup = tableEl.createEl('colgroup');
-    colgroup.createEl('col', { cls: 'terminal-commands-col-drag' });
-    colgroup.createEl('col', { cls: 'terminal-commands-col-name' });
-    colgroup.createEl('col', { cls: 'terminal-commands-col-command' });
-    colgroup.createEl('col', { cls: 'terminal-commands-col-directory' });
-    colgroup.createEl('col', { cls: 'terminal-commands-col-delete' });
+  private getCommandDefinitions(): SettingDefinitionList {
+    return {
+      type: 'list',
+      heading: 'Commands',
+      cls: 'terminal-commands-list',
+      emptyState: 'No commands. Add one to create a command palette entry.',
+      addItem: {
+        name: 'Add command',
+        action: () => {
+          void this.addCommand();
+        }
+      },
+      onReorder: (oldIndex, newIndex) => {
+        const commands = this.plugin.settings.commands;
+        const [movedCommand] = commands.splice(oldIndex, 1);
+        if (!movedCommand) {
+          return;
+        }
+        commands.splice(newIndex, 0, movedCommand);
+        void this.saveImmediately();
+      },
+      onDelete: (index) => {
+        const command = this.plugin.settings.commands[index];
+        if (command) {
+          this.confirmCommandDelete(command, index);
+        }
+      },
+      items: this.plugin.settings.commands.map((command, index) => ({
+        name: command.id,
+        searchable: false,
+        render: (setting) => {
+          this.renderCommandControls(setting, command, index);
+        }
+      }))
+    };
   }
 
-  private createHeaderCell(row: HTMLTableRowElement, text: string, label?: string): void {
-    const cell = row.createEl('th', { text });
-    cell.scope = 'col';
-    if (label) {
-      cell.setAttribute('aria-label', label);
-    }
-  }
-
-  private displayCommandRow(
-    bodyEl: HTMLTableSectionElement,
+  private renderCommandControls(
+    setting: Setting,
     command: CommandSettings,
     index: number
   ): void {
-    const rowEl = bodyEl.createEl('tr', { cls: 'terminal-commands-command-row' });
-    rowEl.dataset.commandId = command.id;
-
-    const dragCell = rowEl.createEl('td', { cls: 'terminal-commands-icon-cell' });
-    const dragHandle = this.createIconButton(
-      dragCell,
-      'grip-vertical',
-      `Drag ${command.name || `command ${index + 1}`}`,
-      'terminal-commands-drag-handle'
+    setting.settingEl.addClass('terminal-commands-command-setting');
+    setting.settingEl.toggleClass(
+      'is-open-terminal',
+      command.kind === 'open-terminal'
     );
-    dragHandle.draggable = true;
-    this.attachCommandDragEvents(rowEl, dragHandle, command.id, index);
+    setting.settingEl.setAttribute(
+      'aria-label',
+      command.name.trim() || `Command ${index + 1}`
+    );
+    setting.infoEl.remove();
+    setting.controlEl.addClass('terminal-commands-command-controls');
 
-    const nameCell = rowEl.createEl('td');
-    const nameInput = nameCell.createEl('input', {
-      attr: { type: 'text', 'aria-label': 'Command palette name', placeholder: 'Name' }
-    });
-    nameInput.value = command.name;
-    nameInput.addEventListener('input', () => {
-      command.name = nameInput.value;
-      this.scheduleSave();
-    });
-
-    const commandCell = rowEl.createEl('td');
-    const commandInput = commandCell.createEl('input', {
-      attr: { type: 'text', 'aria-label': 'Shell command', placeholder: 'Command' }
-    });
-    commandInput.value = command.command;
-    commandInput.addEventListener('input', () => {
-      command.command = commandInput.value;
-      this.scheduleSave();
+    setting.addText((text) => {
+      text.setPlaceholder('Name').setValue(command.name).onChange((value) => {
+        command.name = value;
+        this.scheduleSave();
+      });
+      text.inputEl.setAttribute('aria-label', 'Command palette name');
     });
 
-    const directoryCell = rowEl.createEl('td');
-    const workingDirectorySelect = directoryCell.createEl('select', {
-      attr: { 'aria-label': 'Working directory' }
+    setting.addText((text) => {
+      if (command.kind === 'open-terminal') {
+        text.setValue('').setDisabled(true);
+      } else {
+        text.setPlaceholder('Command').setValue(command.command).onChange((value) => {
+          command.command = value;
+          this.scheduleSave();
+        });
+      }
+      text.inputEl.setAttribute('aria-label', 'Shell command');
     });
-    this.addSelectOption(workingDirectorySelect, 'current-note', 'Current note folder');
-    this.addSelectOption(workingDirectorySelect, 'vault', 'Vault root');
-    workingDirectorySelect.value = command.workingDirectory;
-    workingDirectorySelect.addEventListener('change', () => {
-      command.workingDirectory = workingDirectorySelect.value as WorkingDirectoryMode;
+
+    setting.addDropdown((dropdown) => {
+      this.plugin.settings.terminals.forEach((terminal, terminalIndex) => {
+        dropdown.addOption(
+          terminal.id,
+          this.getTerminalDropdownLabel(terminal, terminalIndex)
+        );
+      });
+      dropdown.setValue(command.terminalId).onChange((value) => {
+        command.terminalId = value;
+        const selectedIndex = this.plugin.settings.terminals.findIndex(
+          (terminal) => terminal.id === value
+        );
+        const selectedTerminal = this.plugin.settings.terminals[selectedIndex];
+        if (selectedTerminal) {
+          dropdown.selectEl.setAttribute(
+            'title',
+            this.getTerminalLabel(selectedTerminal, selectedIndex)
+          );
+        }
+        void this.saveImmediately();
+      });
+      dropdown.selectEl.setAttribute('aria-label', 'Terminal');
+      dropdown.selectEl.addClass('terminal-commands-terminal-dropdown');
+      dropdown.selectEl.setCssProps({
+        '--dropdown-fitted-width': TERMINAL_DROPDOWN_WIDTH
+      });
+      const selectedIndex = this.plugin.settings.terminals.findIndex(
+        (terminal) => terminal.id === command.terminalId
+      );
+      const selectedTerminal = this.plugin.settings.terminals[selectedIndex];
+      if (selectedTerminal) {
+        dropdown.selectEl.setAttribute(
+          'title',
+          this.getTerminalLabel(selectedTerminal, selectedIndex)
+        );
+      }
+    });
+
+    setting.addToggle((toggle) => {
+      toggle
+        .setValue(command.workingDirectory === 'current-note')
+        .setTooltip('Use current note folder')
+        .onChange((value) => {
+          command.workingDirectory = value ? 'current-note' : 'vault';
+          void this.saveImmediately();
+        });
+      toggle.toggleEl.setAttribute('aria-label', 'Use current note folder');
+    });
+
+    setting.addToggle((toggle) => {
+      toggle
+        .setValue(
+          command.kind === 'open-terminal' ? true : command.keepTerminalOpen
+        )
+        .setDisabled(command.kind === 'open-terminal')
+        .setTooltip('Keep terminal open')
+        .onChange((value) => {
+          if (command.kind === 'open-terminal') {
+            return;
+          }
+          command.keepTerminalOpen = value;
+          void this.saveImmediately();
+        });
+      toggle.toggleEl.setAttribute('aria-label', 'Keep terminal open');
+    });
+
+    setting.controlEl.ownerDocument.defaultView?.queueMicrotask(() => {
+      const dragHandle = setting.controlEl.querySelector<HTMLElement>('.mod-drag-handle');
+      if (dragHandle) {
+        setting.controlEl.prepend(dragHandle);
+      }
+      if (command.kind === 'open-terminal') {
+        setting.controlEl
+          .querySelector<HTMLElement>('.mod-delete')
+          ?.remove();
+      }
+    });
+  }
+
+  private renderTerminalControls(
+    setting: Setting,
+    terminal: TerminalProfile,
+    index: number
+  ): void {
+    setting.settingEl.addClass('terminal-commands-terminal-setting');
+    setting.settingEl.setAttribute('aria-label', this.getTerminalLabel(terminal, index));
+    setting.infoEl.remove();
+    setting.controlEl.addClass('terminal-commands-terminal-controls');
+
+    setting.addText((text) => {
+      text.setPlaceholder('Name').setValue(terminal.name).onChange((value) => {
+        terminal.name = value;
+        this.scheduleSave();
+      });
+      text.inputEl.setAttribute('aria-label', 'Terminal name');
+      text.inputEl.addEventListener('blur', () => this.update());
+    });
+
+    let pathInput: HTMLInputElement | null = null;
+    setting.addText((text) => {
+      text.setPlaceholder('Select an executable').setValue(
+        getCurrentTerminalApp(terminal.applications)
+      );
+      text.inputEl.readOnly = true;
+      pathInput = text.inputEl;
+      text.inputEl.setAttribute('aria-label', 'Terminal application');
+    });
+
+    const fileInput = setting.controlEl.createEl('input', {
+      cls: 'terminal-commands-terminal-file-input',
+      attr: { type: 'file', 'aria-hidden': 'true', tabIndex: '-1' }
+    });
+    if (Platform.isWin) {
+      fileInput.accept = '.exe';
+    }
+    fileInput.addEventListener('change', () => {
+      const file = fileInput.files?.[0];
+      if (!file) {
+        return;
+      }
+
+      const executablePath = webUtils.getPathForFile(file);
+      if (!executablePath) {
+        new Notice('Unable to read the selected executable path.');
+        return;
+      }
+      if (Platform.isWin && !executablePath.toLowerCase().endsWith('.exe')) {
+        new Notice('Select a Windows .exe file.');
+        return;
+      }
+      if (Platform.isWin && !isSupportedWindowsTerminalApp(executablePath)) {
+        new Notice(
+          'Supported Windows terminals are cmd.exe, powershell.exe, and pwsh.exe.'
+        );
+        return;
+      }
+
+      terminal.applications = setCurrentTerminalApp(
+        terminal.applications,
+        executablePath
+      );
+      if (pathInput) {
+        pathInput.value = executablePath;
+      }
+      fileInput.value = '';
       void this.saveImmediately();
     });
 
-    const deleteCell = rowEl.createEl('td', { cls: 'terminal-commands-icon-cell' });
-    const deleteButton = this.createIconButton(
-      deleteCell,
-      'trash-2',
-      `Delete ${command.name || `command ${index + 1}`}`,
-      'terminal-commands-delete-button'
+    setting.addExtraButton((button) => {
+      button
+        .setIcon('folder-open')
+        .setTooltip('Select terminal executable')
+        .onClick(() => fileInput.click());
+    });
+  }
+
+  private async addCommand(): Promise<void> {
+    const command = createCommand(
+      this.plugin.settings.commands,
+      this.plugin.settings.terminals[0]?.id ?? ''
     );
-    deleteButton.addEventListener('click', () => {
-      const displayName = command.name.trim() || `command ${index + 1}`;
-      new DeleteCommandModal(this.app, displayName, () => {
-        this.plugin.settings.commands = this.plugin.settings.commands.filter(
-          (candidate) => candidate.id !== command.id
-        );
-        void this.saveImmediately().then(() => this.display());
-      }).open();
-    });
+    this.plugin.settings.commands.push(command);
+    await this.saveImmediately();
+    this.update();
   }
 
-  private createIconButton(
-    parent: HTMLElement,
-    icon: string,
-    label: string,
-    className: string
-  ): HTMLButtonElement {
-    const button = parent.createEl('button', {
-      cls: `clickable-icon ${className}`,
-      attr: { type: 'button', 'aria-label': label, title: label }
-    });
-    setIcon(button, icon);
-    return button;
+  private async addTerminal(): Promise<void> {
+    this.plugin.settings.terminals.push(
+      createTerminalProfile(this.plugin.settings.terminals)
+    );
+    await this.saveImmediately();
+    this.update();
   }
 
-  private addSelectOption(select: HTMLSelectElement, value: string, label: string): void {
-    const option = select.createEl('option', { text: label });
-    option.value = value;
+  private confirmCommandDelete(command: CommandSettings, index: number): void {
+    if (command.kind === 'open-terminal') {
+      new Notice('Open in terminal cannot be deleted.');
+      return;
+    }
+
+    const displayName = command.name.trim() || `Command ${index + 1}`;
+    new DeleteItemModal(this.app, 'command', displayName, () => {
+      const currentIndex = this.plugin.settings.commands.findIndex(
+        (candidate) => candidate.id === command.id
+      );
+      if (currentIndex < 0) {
+        return;
+      }
+      this.plugin.settings.commands.splice(currentIndex, 1);
+      void this.saveImmediately().then(() => this.update());
+    }).open();
   }
 
-  private attachCommandDragEvents(
-    rowEl: HTMLTableRowElement,
-    handle: HTMLElement,
-    commandId: string,
-    index: number
-  ): void {
-    handle.addEventListener('dragstart', (event) => {
-      this.draggedCommandId = commandId;
-      event.dataTransfer?.setData('text/plain', commandId);
-      if (event.dataTransfer) {
-        event.dataTransfer.effectAllowed = 'move';
-      }
-      rowEl.addClass('is-dragging');
-    });
-    handle.addEventListener('dragend', () => {
-      this.clearDragState();
-    });
-    handle.addEventListener('keydown', (event) => {
-      if (!event.altKey || (event.key !== 'ArrowUp' && event.key !== 'ArrowDown')) {
+  private confirmTerminalDelete(terminal: TerminalProfile, index: number): void {
+    if (this.plugin.settings.terminals.length <= 1) {
+      new Notice('At least one terminal is required.');
+      return;
+    }
+
+    const displayName = this.getTerminalLabel(terminal, index);
+    new DeleteItemModal(this.app, 'terminal', displayName, () => {
+      const terminalIndex = this.plugin.settings.terminals.findIndex(
+        (candidate) => candidate.id === terminal.id
+      );
+      if (terminalIndex < 0) {
         return;
       }
-      event.preventDefault();
-      this.moveCommandByOffset(commandId, event.key === 'ArrowUp' ? -1 : 1);
-    });
 
-    rowEl.addEventListener('dragover', (event) => {
-      if (!this.draggedCommandId) {
-        return;
-      }
-      event.preventDefault();
-      event.stopPropagation();
-      const after = event.clientY > rowEl.getBoundingClientRect().top + rowEl.offsetHeight / 2;
-      const bodyEl = rowEl.parentElement;
-      if (bodyEl instanceof HTMLTableSectionElement) {
-        this.showDropIndicator(bodyEl, rowEl, after, index + (after ? 1 : 0));
-      }
-    });
-    rowEl.addEventListener('drop', (event) => {
-      if (!this.draggedCommandId) {
-        return;
-      }
-      event.preventDefault();
-      event.stopPropagation();
-      const sourceId = this.draggedCommandId;
-      const targetIndex = this.dropTargetIndex;
-      if (targetIndex !== null) {
-        this.moveCommand(sourceId, targetIndex);
-      }
-    });
-  }
-
-  private attachTableBodyDropEvents(bodyEl: HTMLTableSectionElement): void {
-    bodyEl.addEventListener('dragover', (event) => {
-      if (!this.draggedCommandId) {
-        return;
-      }
-      event.preventDefault();
-      this.showDropIndicator(bodyEl, null, true, this.plugin.settings.commands.length);
-    });
-    bodyEl.addEventListener('drop', (event) => {
-      if (!this.draggedCommandId) {
-        return;
-      }
-      event.preventDefault();
-      const targetIndex = this.dropTargetIndex ?? this.plugin.settings.commands.length;
-      this.moveCommand(this.draggedCommandId, targetIndex);
-    });
-  }
-
-  private showDropIndicator(
-    bodyEl: HTMLTableSectionElement,
-    referenceRow: HTMLTableRowElement | null,
-    after: boolean,
-    targetIndex: number
-  ): void {
-    if (!this.dropIndicatorRow) {
-      const indicatorRow = document.createElement('tr');
-      indicatorRow.addClass('terminal-commands-drop-indicator');
-      indicatorRow.setAttribute('aria-hidden', 'true');
-
-      indicatorRow.createEl('td', { cls: 'terminal-commands-drop-spacer' });
-      const lineCell = indicatorRow.createEl('td', {
-        cls: 'terminal-commands-drop-line-cell'
-      });
-      lineCell.colSpan = 4;
-      lineCell.createDiv({ cls: 'terminal-commands-drop-line' });
-
-      indicatorRow.addEventListener('dragover', (event) => {
-        event.preventDefault();
-        event.stopPropagation();
-      });
-      indicatorRow.addEventListener('drop', (event) => {
-        if (!this.draggedCommandId || this.dropTargetIndex === null) {
-          return;
+      this.plugin.settings.terminals.splice(terminalIndex, 1);
+      const fallbackTerminalId = this.plugin.settings.terminals[0]?.id ?? '';
+      for (const command of this.plugin.settings.commands) {
+        if (command.terminalId === terminal.id) {
+          command.terminalId = fallbackTerminalId;
         }
-        event.preventDefault();
-        event.stopPropagation();
-        this.moveCommand(this.draggedCommandId, this.dropTargetIndex);
+      }
+      void this.saveImmediately().then(() => this.update());
+    }).open();
+  }
+
+  private confirmRestoreTerminals(): void {
+    new RestoreTerminalsModal(this.app, () => {
+      restoreDefaultTerminalProfiles(this.plugin.settings);
+      void this.saveImmediately().then(() => this.update());
+    }).open();
+  }
+
+  private getTerminalLabel(terminal: TerminalProfile, index: number): string {
+    return terminal.name.trim() || `Terminal ${index + 1}`;
+  }
+
+  private getTerminalDropdownLabel(
+    terminal: TerminalProfile,
+    index: number
+  ): string {
+    const label = this.getTerminalLabel(terminal, index);
+    const characters = [...label];
+    return characters.length > 8
+      ? `${characters.slice(0, 8).join('')}…`
+      : label;
+  }
+
+  private observeCommandList(): void {
+    if (!this.commandListObserver) {
+      const ViewMutationObserver =
+        this.containerEl.ownerDocument.defaultView?.MutationObserver;
+      if (ViewMutationObserver) {
+        this.commandListObserver = new ViewMutationObserver(() => {
+          this.addCommandListChrome();
+        });
+        this.commandListObserver.observe(this.containerEl, {
+          childList: true,
+          subtree: true
+        });
+      }
+    }
+    this.addCommandListChrome();
+  }
+
+  private addCommandListChrome(): void {
+    const terminalGroupEl = this.containerEl.querySelector<HTMLElement>(
+      '.terminal-commands-terminals-list'
+    );
+    const terminalHeadingEl = terminalGroupEl?.querySelector<HTMLElement>(
+      '.setting-item-heading'
+    );
+    const terminalHeadingControlsEl = terminalHeadingEl?.querySelector<HTMLElement>(
+      '.setting-item-control'
+    );
+    if (
+      terminalHeadingControlsEl &&
+      !terminalHeadingControlsEl.querySelector('.terminal-commands-restore-terminals')
+    ) {
+      const restoreButton = new ButtonComponent(terminalHeadingControlsEl)
+        .setButtonText('Restore defaults')
+        .setTooltip('Restore the platform default terminal list')
+        .setClass('terminal-commands-restore-terminals')
+        .onClick(() => this.confirmRestoreTerminals());
+      terminalHeadingControlsEl.prepend(restoreButton.buttonEl);
+    }
+    if (
+      terminalGroupEl &&
+      terminalHeadingEl &&
+      !terminalGroupEl.querySelector('.terminal-commands-group-description')
+    ) {
+      const terminalDescriptionEl = terminalGroupEl.createDiv({
+        cls: 'terminal-commands-group-description',
+        text: this.getTerminalGroupDescription()
       });
-      this.dropIndicatorRow = indicatorRow;
+      terminalHeadingEl.after(terminalDescriptionEl);
     }
-
-    this.dropTargetIndex = targetIndex;
-    if (!referenceRow) {
-      bodyEl.appendChild(this.dropIndicatorRow);
-      return;
-    }
-    const insertionPoint = after ? referenceRow.nextSibling : referenceRow;
-    bodyEl.insertBefore(this.dropIndicatorRow, insertionPoint);
-  }
-
-  private moveCommand(commandId: string, targetIndex: number): void {
-    const commands = this.plugin.settings.commands;
-    const sourceIndex = commands.findIndex((command) => command.id === commandId);
-    if (sourceIndex < 0) {
-      this.clearDragState();
-      return;
-    }
-
-    const [moved] = commands.splice(sourceIndex, 1);
-    let insertionIndex = targetIndex;
-    if (sourceIndex < insertionIndex) {
-      insertionIndex -= 1;
-    }
-    insertionIndex = Math.max(0, Math.min(insertionIndex, commands.length));
-    commands.splice(insertionIndex, 0, moved);
-    this.finishReorder();
-  }
-
-  private moveCommandByOffset(commandId: string, offset: number): void {
-    const commands = this.plugin.settings.commands;
-    const sourceIndex = commands.findIndex((command) => command.id === commandId);
-    const targetIndex = sourceIndex + offset;
-    if (sourceIndex < 0 || targetIndex < 0 || targetIndex >= commands.length) {
-      return;
-    }
-    const [moved] = commands.splice(sourceIndex, 1);
-    commands.splice(targetIndex, 0, moved);
-    this.finishReorder();
-  }
-
-  private finishReorder(): void {
-    this.clearDragState();
-    void this.saveImmediately().then(() => this.display());
-  }
-
-  private clearDragState(): void {
-    this.draggedCommandId = null;
-    this.dropTargetIndex = null;
-    this.dropIndicatorRow?.remove();
-    this.dropIndicatorRow = null;
-    this.containerEl
-      .querySelectorAll('.is-dragging')
-      .forEach((element) => {
-        element.classList.remove('is-dragging');
+    const terminalListEl = terminalGroupEl?.querySelector<HTMLElement>('.setting-items');
+    if (
+      terminalListEl &&
+      !terminalListEl.querySelector('.terminal-commands-terminal-column-headers')
+    ) {
+      const terminalHeadersEl = terminalListEl.createDiv({
+        cls: 'terminal-commands-terminal-column-headers',
+        attr: { role: 'row' }
       });
+      for (const [label, centered] of [
+        ['Name', false],
+        ['Path', false],
+        ['Browse', true],
+        ['Delete', true]
+      ] as const) {
+        terminalHeadersEl.createDiv({
+          cls: `terminal-commands-column-header${centered ? ' is-centered' : ''}`,
+          text: label,
+          attr: { role: 'columnheader' }
+        });
+      }
+      terminalListEl.prepend(terminalHeadersEl);
+    }
+
+    const groupEl = this.containerEl.querySelector<HTMLElement>('.terminal-commands-list');
+    if (!groupEl) {
+      return;
+    }
+
+    const headingEl = groupEl.querySelector<HTMLElement>('.setting-item-heading');
+    if (headingEl && !groupEl.querySelector('.terminal-commands-group-description')) {
+      const descriptionEl = groupEl.createDiv({
+        cls: 'terminal-commands-group-description'
+      });
+      descriptionEl.createDiv({
+        text: 'Note folder: on uses the note folder; off uses the Vault folder.'
+      });
+      descriptionEl.createDiv({
+        text: 'Keep open: on keeps the terminal open after the command finishes; off closes it.'
+      });
+      headingEl.after(descriptionEl);
+    }
+
+    const listEl = groupEl.querySelector<HTMLElement>('.setting-items');
+    if (!listEl || listEl.querySelector('.terminal-commands-column-headers')) {
+      return;
+    }
+
+    const headersEl = listEl.createDiv({
+      cls: 'terminal-commands-column-headers',
+      attr: { role: 'row' }
+    });
+    for (const [label, centered] of [
+      ['Sort', true],
+      ['Name', false],
+      ['Command', false],
+      ['Terminal', false],
+      ['Note folder', true],
+      ['Keep open', true],
+      ['Delete', true]
+    ] as const) {
+      headersEl.createDiv({
+        cls: `terminal-commands-column-header${centered ? ' is-centered' : ''}`,
+        text: label,
+        attr: { role: 'columnheader' }
+      });
+    }
+    listEl.prepend(headersEl);
+  }
+
+  private getTerminalGroupDescription(): string {
+    if (Platform.isWin) {
+      return 'Supported terminals: Command Prompt (cmd), Windows PowerShell, and PowerShell 7 (pwsh). Other .exe files are rejected.';
+    }
+    if (Platform.isMacOS) {
+      return 'Supported terminals: Terminal and terminal apps that can open .command scripts.';
+    }
+    if (Platform.isLinux) {
+      return 'Supported terminals: GNOME Terminal and terminals compatible with -e bash -lc.';
+    }
+    return 'Terminal launching is available in the Obsidian desktop app.';
   }
 
   private scheduleSave(): void {

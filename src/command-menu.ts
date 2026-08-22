@@ -1,15 +1,15 @@
 import { App, FuzzySuggestModal, type FuzzyMatch } from 'obsidian';
 
-import type { WorkingDirectoryMode } from './settings';
-import type { LaunchTarget } from './targets';
+import {
+  getLaunchTargetDirectoryLabel,
+  getLaunchTargetTagLabels,
+  getLaunchTargetTerminalLabel,
+  sortLaunchTargetsByGroup,
+  type LaunchTarget
+} from './targets';
 
-const getWorkingDirectoryLabel = (workingDirectory: WorkingDirectoryMode): string =>
-  workingDirectory === 'current-note' ? 'Active note folder' : 'Vault folder';
-
-const getCommandDetails = (target: LaunchTarget): string => {
-  const command = target.toolCommand ?? 'Open terminal';
-  return `(${getWorkingDirectoryLabel(target.workingDirectory)}) ${command}`;
-};
+const getCommandDetails = (target: LaunchTarget): string =>
+  target.toolCommand ?? 'Open terminal';
 
 export class TerminalCommandMenu extends FuzzySuggestModal<LaunchTarget> {
   constructor(
@@ -27,11 +27,11 @@ export class TerminalCommandMenu extends FuzzySuggestModal<LaunchTarget> {
   }
 
   getItems(): LaunchTarget[] {
-    return [...this.targets];
+    return sortLaunchTargetsByGroup(this.targets);
   }
 
   getItemText(target: LaunchTarget): string {
-    return `${target.commandName} ${getCommandDetails(target)}`;
+    return `${target.terminalName} ${getLaunchTargetDirectoryLabel(target)} ${getLaunchTargetTerminalLabel(target)} ${target.commandName} ${getCommandDetails(target)}`;
   }
 
   renderSuggestion(match: FuzzyMatch<LaunchTarget>, el: HTMLElement): void {
@@ -39,7 +39,24 @@ export class TerminalCommandMenu extends FuzzySuggestModal<LaunchTarget> {
     const details = getCommandDetails(target);
 
     el.addClass('terminal-commands-menu-item');
-    el.createDiv({ cls: 'terminal-commands-menu-name', text: target.commandName });
+    const headingEl = el.createDiv({ cls: 'terminal-commands-menu-heading' });
+    headingEl.createDiv({ cls: 'terminal-commands-menu-name', text: target.commandName });
+    const tagsEl = headingEl.createDiv({ cls: 'terminal-commands-menu-tags' });
+    const [terminalNameLabel, directoryLabel, terminalBehaviorLabel] =
+      getLaunchTargetTagLabels(target);
+    const terminalNameTagEl = tagsEl.createSpan({
+      cls: 'terminal-commands-menu-tag terminal-commands-menu-tag-terminal-name',
+      text: terminalNameLabel
+    });
+    terminalNameTagEl.setAttr('title', target.terminalName);
+    tagsEl.createSpan({
+      cls: 'terminal-commands-menu-tag terminal-commands-menu-tag-directory',
+      text: directoryLabel
+    });
+    tagsEl.createSpan({
+      cls: 'terminal-commands-menu-tag terminal-commands-menu-tag-terminal-behavior',
+      text: terminalBehaviorLabel
+    });
     const detailsEl = el.createDiv({ cls: 'terminal-commands-menu-details', text: details });
     detailsEl.setAttr('title', details);
   }

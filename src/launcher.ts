@@ -1,24 +1,55 @@
-import { mkdtempSync, rmSync, writeFileSync } from 'fs';
-import { tmpdir } from 'os';
-import { join } from 'path';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, win32 } from 'node:path';
 
 import { Platform } from 'obsidian';
 
 import { logger } from './logger';
 
 export type LaunchCommand = {
-  command: string;
-  cwd?: string;
+  executable: string;
+  args: string[];
+  cwd: string;
+  shell?: boolean;
   cleanup?: () => void;
 };
 
 export type LaunchOptions = {
   reuseExistingMacApp?: boolean;
+  keepTerminalOpen?: boolean;
 };
+
+export type DesktopLaunchPlatform = 'macos' | 'windows' | 'unix';
 
 const sanitizeTerminalApp = (value: string): string => value.trim();
 
-const escapeDoubleQuotes = (value: string): string => value.replace(/"/g, '\\"');
+const quotePosix = (value: string): string => `'${value.replace(/'/g, `'"'"'`)}'`;
+
+const quoteCmdPath = (value: string): string => `"${value.replace(/"/g, '""')}"`;
+
+const quotePowerShellPath = (value: string): string => `'${value.replace(/'/g, "''")}'`;
+
+const quoteWindowsExecutable = (value: string): string =>
+  /[\s&(){}^=;!'+,`~]/.test(value) ? quoteCmdPath(value) : value;
+
+type WindowsTerminalKind = 'cmd' | 'powershell' | 'pwsh';
+
+const getWindowsTerminalKind = (value: string): WindowsTerminalKind | null => {
+  const executableName = win32.basename(sanitizeTerminalApp(value)).toLowerCase();
+  if (executableName === 'cmd' || executableName === 'cmd.exe') {
+    return 'cmd';
+  }
+  if (executableName === 'powershell' || executableName === 'powershell.exe') {
+    return 'powershell';
+  }
+  if (executableName === 'pwsh' || executableName === 'pwsh.exe') {
+    return 'pwsh';
+  }
+  return null;
+};
+
+export const isSupportedWindowsTerminalApp = (value: string): boolean =>
+  getWindowsTerminalKind(value) !== null;
 
 export const getPlatformSummary = (): string => {
   if (Platform.isDesktopApp) {
@@ -48,14 +79,21 @@ export const getPlatformSummary = (): string => {
 const ensureTempScript = (content: string): { path: string; cleanup: () => void } => {
   const dir = mkdtempSync(join(tmpdir(), 'terminal-commands-'));
   const filePath = join(dir, 'launch.command');
-  logger.log('Creating temp script', { dir, filePath });
-  writeFileSync(filePath, content, { mode: 0o755 });
-  const cleanup = () => {
+
+  try {
+    writeFileSync(filePath, content, { mode: 0o755 });
+  } catch (error) {
+    rmSync(dir, { recursive: true, force: true });
+    throw error;
+  }
+
+  logger.log('Created temporary launch script', { dir, filePath });
+  const cleanup = (): void => {
     try {
       rmSync(dir, { recursive: true, force: true });
-      logger.log('Cleaned temp script', dir);
+      logger.log('Cleaned temporary launch script', dir);
     } catch (error) {
-      console.warn('[terminal-commands] Failed to remove temp script', error);
+      console.warn('[terminal-commands] Failed to remove temporary launch script', error);
     }
   };
   return { path: filePath, cleanup };
@@ -73,116 +111,117 @@ const buildMacLaunch = (
   }
 
   const openFlag = options?.reuseExistingMacApp === false ? '-na' : '-a';
-
   if (!toolCommand) {
-    const escapedApp = escapeDoubleQuotes(app);
-    const escapedPath = escapeDoubleQuotes(vaultPath);
-    const command = `open ${openFlag} "${escapedApp}" "${escapedPath}"`;
-    logger.log('macOS simple launch', { app, command, vaultPath });
-    return { command, cwd: vaultPath };
+    return {
+      executable: 'open',
+      args: [openFlag, app, vaultPath],
+      cwd: vaultPath
+    };
   }
 
-  const escapedVaultPath = escapeDoubleQuotes(vaultPath);
-  const scriptLines = ['#!/bin/bash', `cd "${escapedVaultPath}"`];
-  if (toolCommand) {
-    scriptLines.push(toolCommand);
+  const scriptLines = ['#!/bin/bash', `cd -- ${quotePosix(vaultPath)}`, toolCommand];
+  if (options?.keepTerminalOpen !== false) {
+    scriptLines.push('exec "$SHELL"');
   }
-  scriptLines.push('exec "$SHELL"');
   const { path, cleanup } = ensureTempScript(scriptLines.join('\n'));
-  const command = `open ${openFlag} "${escapeDoubleQuotes(app)}" "${path}"`;
-  logger.log('macOS script launch', { app, command, script: path, toolCommand });
-  return { command, cwd: vaultPath, cleanup };
+  return {
+    executable: 'open',
+    args: [openFlag, app, path],
+    cwd: vaultPath,
+    cleanup
+  };
 };
 
 const buildWindowsLaunch = (
   terminalApp: string,
   vaultPath: string,
-  toolCommand?: string
+  toolCommand?: string,
+  options?: LaunchOptions
 ): LaunchCommand | null => {
   const app = sanitizeTerminalApp(terminalApp);
   if (!app) {
     return null;
   }
 
-  const escapedVault = vaultPath.replace(/"/g, '"');
-  const cdCommand = `cd /d "${escapedVault}"`;
-  const tool = toolCommand ? ` && ${toolCommand}` : '';
+  const terminalKind = getWindowsTerminalKind(app);
+  if (!terminalKind) {
+    logger.log('Rejected unsupported Windows terminal executable', { app });
+    return null;
+  }
+  const executable = quoteWindowsExecutable(app);
+  const cmdBody = `cd /d ${quoteCmdPath(vaultPath)}${toolCommand ? ` && ${toolCommand}` : ''}`;
+  const cmdMode = options?.keepTerminalOpen === false ? '/C' : '/K';
 
-  const lowerApp = app.toLowerCase();
-
-  if (lowerApp === 'cmd.exe' || lowerApp === 'cmd') {
-    const command = toolCommand
-      ? `start "" cmd.exe /K "${cdCommand}${tool}"`
-      : `start "" cmd.exe /K "${cdCommand}"`;
-    logger.log('Windows launch (cmd.exe)', { command, toolCommand, vaultPath });
-    return { command, cwd: vaultPath };
+  if (terminalKind === 'cmd') {
+    return {
+      executable: `start "" ${executable} ${cmdMode} "${cmdBody}"`,
+      args: [],
+      cwd: vaultPath,
+      shell: true
+    };
   }
 
-  if (lowerApp === 'powershell' || lowerApp === 'powershell.exe') {
-    if (!toolCommand) {
-      const command = `start "" powershell -NoExit -Command "Set-Location '${vaultPath.replace(
-        /'/g,
-        "''"
-      )}';"`;
-      logger.log('Windows launch (powershell)', { command, toolCommand, vaultPath });
-      return { command, cwd: vaultPath };
-    }
-    const command = `start "" powershell -NoExit -Command "Set-Location '${vaultPath.replace(
-      /'/g,
-      "''"
-    )}'; ${toolCommand}"`;
-    logger.log('Windows launch (powershell tool)', { command, toolCommand, vaultPath });
-    return { command, cwd: vaultPath };
+  if (terminalKind === 'powershell' || terminalKind === 'pwsh') {
+    const powerShellBody = `Set-Location -LiteralPath ${quotePowerShellPath(vaultPath)}${
+      toolCommand ? `; ${toolCommand}` : ''
+    }`;
+    return {
+      executable: `start "" ${executable}${
+        options?.keepTerminalOpen === false ? '' : ' -NoExit'
+      } -Command "${powerShellBody}"`,
+      args: [],
+      cwd: vaultPath,
+      shell: true
+    };
   }
 
-  if (lowerApp === 'wt.exe' || lowerApp === 'wt') {
-    const command = toolCommand
-      ? `start "" wt.exe new-tab cmd /K "${cdCommand}${tool}"`
-      : `start "" wt.exe new-tab cmd /K "${cdCommand}"`;
-    logger.log('Windows launch (wt)', { command, toolCommand, vaultPath });
-    return { command, cwd: vaultPath };
-  }
-
-  if (!toolCommand) {
-    const command = `start "" "${app}"`;
-    logger.log('Windows launch (generic simple)', { command, vaultPath });
-    return { command, cwd: vaultPath };
-  }
-
-  const command = `start "" cmd.exe /K "${cdCommand}${tool}"`;
-  logger.log('Windows launch (generic tool fallback)', { command, app, toolCommand, vaultPath });
-  return { command, cwd: vaultPath };
+  return null;
 };
 
-const buildUnixLaunch = (terminalApp: string, vaultPath: string, toolCommand?: string): LaunchCommand | null => {
+const buildUnixLaunch = (
+  terminalApp: string,
+  vaultPath: string,
+  toolCommand?: string,
+  options?: LaunchOptions
+): LaunchCommand | null => {
   const app = sanitizeTerminalApp(terminalApp);
   if (!app) {
     return null;
   }
 
   if (!toolCommand) {
-    const command = `${app}`;
-    logger.log('Unix launch (simple)', { command, vaultPath });
-    return { command, cwd: vaultPath };
+    return {
+      executable: app,
+      args: [],
+      cwd: vaultPath
+    };
   }
 
-  const shellCommand = `cd \\\"$PWD\\\"; ${toolCommand}; exec \\\"$SHELL\\\"`;
+  const shellCommand =
+    options?.keepTerminalOpen === false ? toolCommand : `${toolCommand}; exec "$SHELL"`;
+  return {
+    executable: app,
+    args: app.includes('gnome-terminal')
+      ? ['--', 'bash', '-lc', shellCommand]
+      : ['-e', 'bash', '-lc', shellCommand],
+    cwd: vaultPath
+  };
+};
 
-  if (app.includes('gnome-terminal')) {
-    const command = `${app} -- bash -lc "${shellCommand}"`;
-    logger.log('Unix launch (gnome-terminal)', { command, toolCommand, vaultPath });
-    return { command, cwd: vaultPath };
+export const buildLaunchCommandForPlatform = (
+  platform: DesktopLaunchPlatform,
+  terminalApp: string,
+  vaultPath: string,
+  toolCommand?: string,
+  options?: LaunchOptions
+): LaunchCommand | null => {
+  if (platform === 'macos') {
+    return buildMacLaunch(terminalApp, vaultPath, toolCommand, options);
   }
-
-  if (app.includes('konsole')) {
-    const command = `${app} -e bash -lc "${shellCommand}"`;
-    logger.log('Unix launch (konsole)', { command, toolCommand, vaultPath });
-    return { command, cwd: vaultPath };
+  if (platform === 'windows') {
+    return buildWindowsLaunch(terminalApp, vaultPath, toolCommand, options);
   }
-
-  const command = `${app} -e bash -lc "${shellCommand}"`;
-  logger.log('Unix launch (generic tool)', { command, toolCommand, vaultPath });
-  return { command, cwd: vaultPath };
+  return buildUnixLaunch(terminalApp, vaultPath, toolCommand, options);
 };
 
 export const buildLaunchCommand = (
@@ -195,10 +234,10 @@ export const buildLaunchCommand = (
     return null;
   }
   if (Platform.isMacOS) {
-    return buildMacLaunch(terminalApp, vaultPath, toolCommand, options);
+    return buildLaunchCommandForPlatform('macos', terminalApp, vaultPath, toolCommand, options);
   }
   if (Platform.isWin) {
-    return buildWindowsLaunch(terminalApp, vaultPath, toolCommand);
+    return buildLaunchCommandForPlatform('windows', terminalApp, vaultPath, toolCommand, options);
   }
-  return buildUnixLaunch(terminalApp, vaultPath, toolCommand);
+  return buildLaunchCommandForPlatform('unix', terminalApp, vaultPath, toolCommand, options);
 };

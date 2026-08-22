@@ -1,50 +1,60 @@
 'use strict';
 
-var child_process = require('child_process');
-var path = require('path');
+var node_child_process = require('node:child_process');
+var node_path = require('node:path');
 var obsidian = require('obsidian');
-var fs = require('fs');
-var os = require('os');
+var node_fs = require('node:fs');
+var node_os = require('node:os');
+var electron = require('electron');
 
-/******************************************************************************
-Copyright (c) Microsoft Corporation.
-
-Permission to use, copy, modify, and/or distribute this software for any
-purpose with or without fee is hereby granted.
-
-THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH
-REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY
-AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY SPECIAL, DIRECT,
-INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM
-LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR
-OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR
-PERFORMANCE OF THIS SOFTWARE.
-***************************************************************************** */
-/* global Reflect, Promise, SuppressedError, Symbol, Iterator */
-
-
-function __awaiter(thisArg, _arguments, P, generator) {
-    function adopt(value) { return value instanceof P ? value : new P(function (resolve) { resolve(value); }); }
-    return new (P || (P = Promise))(function (resolve, reject) {
-        function fulfilled(value) { try { step(generator.next(value)); } catch (e) { reject(e); } }
-        function rejected(value) { try { step(generator["throw"](value)); } catch (e) { reject(e); } }
-        function step(result) { result.done ? resolve(result.value) : adopt(result.value).then(fulfilled, rejected); }
-        step((generator = generator.apply(thisArg, _arguments || [])).next());
-    });
-}
-
-typeof SuppressedError === "function" ? SuppressedError : function (error, suppressed, message) {
-    var e = new Error(message);
-    return e.name = "SuppressedError", e.error = error, e.suppressed = suppressed, e;
+const getLaunchTargetDirectoryLabel = (target) => target.workingDirectory === 'current-note' ? 'Note folder' : 'Vault folder';
+const getLaunchTargetTerminalLabel = (target) => target.keepTerminalOpen ? 'Keep terminal' : 'Close terminal';
+const getLaunchTargetTerminalNameLabel = (target) => {
+    const characters = [...target.terminalName];
+    return characters.length > 8
+        ? `${characters.slice(0, 8).join('')}…`
+        : target.terminalName;
+};
+const getLaunchTargetTagLabels = (target) => [
+    getLaunchTargetTerminalNameLabel(target),
+    getLaunchTargetDirectoryLabel(target),
+    getLaunchTargetTerminalLabel(target)
+];
+const sortLaunchTargetsByGroup = (targets) => [...targets].sort((left, right) => Number(right.keepTerminalOpen) - Number(left.keepTerminalOpen));
+const buildLaunchTargets = (settings) => {
+    const targets = [];
+    for (const configuredCommand of settings.commands) {
+        const name = configuredCommand.name.trim();
+        const command = configuredCommand.command.trim();
+        if (!name ||
+            (configuredCommand.kind === 'shell-command' && !command)) {
+            continue;
+        }
+        const configuredTerminalIndex = settings.terminals.findIndex((terminal) => terminal.id === configuredCommand.terminalId);
+        const terminalIndex = configuredTerminalIndex >= 0 ? configuredTerminalIndex : 0;
+        const terminal = settings.terminals[terminalIndex];
+        const terminalName = terminal?.name.trim() || `Terminal ${terminalIndex + 1}`;
+        targets.push({
+            id: configuredCommand.kind === 'open-terminal'
+                ? 'open-terminal'
+                : `open-${configuredCommand.id}`,
+            commandName: name,
+            toolCommand: configuredCommand.kind === 'open-terminal' ? undefined : command,
+            workingDirectory: configuredCommand.workingDirectory,
+            keepTerminalOpen: configuredCommand.kind === 'open-terminal'
+                ? true
+                : configuredCommand.keepTerminalOpen,
+            terminalId: terminal?.id ?? configuredCommand.terminalId,
+            terminalName
+        });
+    }
+    return targets;
 };
 
-const getWorkingDirectoryLabel = (workingDirectory) => workingDirectory === 'current-note' ? 'Active note folder' : 'Vault folder';
-const getCommandDetails = (target) => {
-    var _a;
-    const command = (_a = target.toolCommand) !== null && _a !== void 0 ? _a : 'Open terminal';
-    return `(${getWorkingDirectoryLabel(target.workingDirectory)}) ${command}`;
-};
+const getCommandDetails = (target) => target.toolCommand ?? 'Open terminal';
 class TerminalCommandMenu extends obsidian.FuzzySuggestModal {
+    targets;
+    onChoose;
     constructor(app, targets, onChoose) {
         super(app);
         this.targets = targets;
@@ -57,16 +67,32 @@ class TerminalCommandMenu extends obsidian.FuzzySuggestModal {
         ]);
     }
     getItems() {
-        return [...this.targets];
+        return sortLaunchTargetsByGroup(this.targets);
     }
     getItemText(target) {
-        return `${target.commandName} ${getCommandDetails(target)}`;
+        return `${target.terminalName} ${getLaunchTargetDirectoryLabel(target)} ${getLaunchTargetTerminalLabel(target)} ${target.commandName} ${getCommandDetails(target)}`;
     }
     renderSuggestion(match, el) {
         const target = match.item;
         const details = getCommandDetails(target);
         el.addClass('terminal-commands-menu-item');
-        el.createDiv({ cls: 'terminal-commands-menu-name', text: target.commandName });
+        const headingEl = el.createDiv({ cls: 'terminal-commands-menu-heading' });
+        headingEl.createDiv({ cls: 'terminal-commands-menu-name', text: target.commandName });
+        const tagsEl = headingEl.createDiv({ cls: 'terminal-commands-menu-tags' });
+        const [terminalNameLabel, directoryLabel, terminalBehaviorLabel] = getLaunchTargetTagLabels(target);
+        const terminalNameTagEl = tagsEl.createSpan({
+            cls: 'terminal-commands-menu-tag terminal-commands-menu-tag-terminal-name',
+            text: terminalNameLabel
+        });
+        terminalNameTagEl.setAttr('title', target.terminalName);
+        tagsEl.createSpan({
+            cls: 'terminal-commands-menu-tag terminal-commands-menu-tag-directory',
+            text: directoryLabel
+        });
+        tagsEl.createSpan({
+            cls: 'terminal-commands-menu-tag terminal-commands-menu-tag-terminal-behavior',
+            text: terminalBehaviorLabel
+        });
         const detailsEl = el.createDiv({ cls: 'terminal-commands-menu-details', text: details });
         detailsEl.setAttr('title', details);
     }
@@ -98,7 +124,24 @@ const logger = {
 };
 
 const sanitizeTerminalApp = (value) => value.trim();
-const escapeDoubleQuotes = (value) => value.replace(/"/g, '\\"');
+const quotePosix = (value) => `'${value.replace(/'/g, `'"'"'`)}'`;
+const quoteCmdPath = (value) => `"${value.replace(/"/g, '""')}"`;
+const quotePowerShellPath = (value) => `'${value.replace(/'/g, "''")}'`;
+const quoteWindowsExecutable = (value) => /[\s&(){}^=;!'+,`~]/.test(value) ? quoteCmdPath(value) : value;
+const getWindowsTerminalKind = (value) => {
+    const executableName = node_path.win32.basename(sanitizeTerminalApp(value)).toLowerCase();
+    if (executableName === 'cmd' || executableName === 'cmd.exe') {
+        return 'cmd';
+    }
+    if (executableName === 'powershell' || executableName === 'powershell.exe') {
+        return 'powershell';
+    }
+    if (executableName === 'pwsh' || executableName === 'pwsh.exe') {
+        return 'pwsh';
+    }
+    return null;
+};
+const isSupportedWindowsTerminalApp = (value) => getWindowsTerminalKind(value) !== null;
 const getPlatformSummary = () => {
     if (obsidian.Platform.isDesktopApp) {
         if (obsidian.Platform.isMacOS) {
@@ -124,17 +167,23 @@ const getPlatformSummary = () => {
     return 'unknown';
 };
 const ensureTempScript = (content) => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'terminal-commands-'));
-    const filePath = path.join(dir, 'launch.command');
-    logger.log('Creating temp script', { dir, filePath });
-    fs.writeFileSync(filePath, content, { mode: 0o755 });
+    const dir = node_fs.mkdtempSync(node_path.join(node_os.tmpdir(), 'terminal-commands-'));
+    const filePath = node_path.join(dir, 'launch.command');
+    try {
+        node_fs.writeFileSync(filePath, content, { mode: 0o755 });
+    }
+    catch (error) {
+        node_fs.rmSync(dir, { recursive: true, force: true });
+        throw error;
+    }
+    logger.log('Created temporary launch script', { dir, filePath });
     const cleanup = () => {
         try {
-            fs.rmSync(dir, { recursive: true, force: true });
-            logger.log('Cleaned temp script', dir);
+            node_fs.rmSync(dir, { recursive: true, force: true });
+            logger.log('Cleaned temporary launch script', dir);
         }
         catch (error) {
-            console.warn('[terminal-commands] Failed to remove temp script', error);
+            console.warn('[terminal-commands] Failed to remove temporary launch script', error);
         }
     };
     return { path: filePath, cleanup };
@@ -144,144 +193,173 @@ const buildMacLaunch = (terminalApp, vaultPath, toolCommand, options) => {
     if (!app) {
         return null;
     }
-    const openFlag = (options === null || options === void 0 ? void 0 : options.reuseExistingMacApp) === false ? '-na' : '-a';
+    const openFlag = options?.reuseExistingMacApp === false ? '-na' : '-a';
     if (!toolCommand) {
-        const escapedApp = escapeDoubleQuotes(app);
-        const escapedPath = escapeDoubleQuotes(vaultPath);
-        const command = `open ${openFlag} "${escapedApp}" "${escapedPath}"`;
-        logger.log('macOS simple launch', { app, command, vaultPath });
-        return { command, cwd: vaultPath };
+        return {
+            executable: 'open',
+            args: [openFlag, app, vaultPath],
+            cwd: vaultPath
+        };
     }
-    const escapedVaultPath = escapeDoubleQuotes(vaultPath);
-    const scriptLines = ['#!/bin/bash', `cd "${escapedVaultPath}"`];
-    if (toolCommand) {
-        scriptLines.push(toolCommand);
+    const scriptLines = ['#!/bin/bash', `cd -- ${quotePosix(vaultPath)}`, toolCommand];
+    if (options?.keepTerminalOpen !== false) {
+        scriptLines.push('exec "$SHELL"');
     }
-    scriptLines.push('exec "$SHELL"');
     const { path, cleanup } = ensureTempScript(scriptLines.join('\n'));
-    const command = `open ${openFlag} "${escapeDoubleQuotes(app)}" "${path}"`;
-    logger.log('macOS script launch', { app, command, script: path, toolCommand });
-    return { command, cwd: vaultPath, cleanup };
+    return {
+        executable: 'open',
+        args: [openFlag, app, path],
+        cwd: vaultPath,
+        cleanup
+    };
 };
-const buildWindowsLaunch = (terminalApp, vaultPath, toolCommand) => {
+const buildWindowsLaunch = (terminalApp, vaultPath, toolCommand, options) => {
     const app = sanitizeTerminalApp(terminalApp);
     if (!app) {
         return null;
     }
-    const escapedVault = vaultPath.replace(/"/g, '"');
-    const cdCommand = `cd /d "${escapedVault}"`;
-    const tool = toolCommand ? ` && ${toolCommand}` : '';
-    const lowerApp = app.toLowerCase();
-    if (lowerApp === 'cmd.exe' || lowerApp === 'cmd') {
-        const command = toolCommand
-            ? `start "" cmd.exe /K "${cdCommand}${tool}"`
-            : `start "" cmd.exe /K "${cdCommand}"`;
-        logger.log('Windows launch (cmd.exe)', { command, toolCommand, vaultPath });
-        return { command, cwd: vaultPath };
+    const terminalKind = getWindowsTerminalKind(app);
+    if (!terminalKind) {
+        logger.log('Rejected unsupported Windows terminal executable', { app });
+        return null;
     }
-    if (lowerApp === 'powershell' || lowerApp === 'powershell.exe') {
-        if (!toolCommand) {
-            const command = `start "" powershell -NoExit -Command "Set-Location '${vaultPath.replace(/'/g, "''")}';"`;
-            logger.log('Windows launch (powershell)', { command, toolCommand, vaultPath });
-            return { command, cwd: vaultPath };
-        }
-        const command = `start "" powershell -NoExit -Command "Set-Location '${vaultPath.replace(/'/g, "''")}'; ${toolCommand}"`;
-        logger.log('Windows launch (powershell tool)', { command, toolCommand, vaultPath });
-        return { command, cwd: vaultPath };
+    const executable = quoteWindowsExecutable(app);
+    const cmdBody = `cd /d ${quoteCmdPath(vaultPath)}${toolCommand ? ` && ${toolCommand}` : ''}`;
+    const cmdMode = options?.keepTerminalOpen === false ? '/C' : '/K';
+    if (terminalKind === 'cmd') {
+        return {
+            executable: `start "" ${executable} ${cmdMode} "${cmdBody}"`,
+            args: [],
+            cwd: vaultPath,
+            shell: true
+        };
     }
-    if (lowerApp === 'wt.exe' || lowerApp === 'wt') {
-        const command = toolCommand
-            ? `start "" wt.exe new-tab cmd /K "${cdCommand}${tool}"`
-            : `start "" wt.exe new-tab cmd /K "${cdCommand}"`;
-        logger.log('Windows launch (wt)', { command, toolCommand, vaultPath });
-        return { command, cwd: vaultPath };
+    if (terminalKind === 'powershell' || terminalKind === 'pwsh') {
+        const powerShellBody = `Set-Location -LiteralPath ${quotePowerShellPath(vaultPath)}${toolCommand ? `; ${toolCommand}` : ''}`;
+        return {
+            executable: `start "" ${executable}${options?.keepTerminalOpen === false ? '' : ' -NoExit'} -Command "${powerShellBody}"`,
+            args: [],
+            cwd: vaultPath,
+            shell: true
+        };
     }
-    if (!toolCommand) {
-        const command = `start "" "${app}"`;
-        logger.log('Windows launch (generic simple)', { command, vaultPath });
-        return { command, cwd: vaultPath };
-    }
-    const command = `start "" cmd.exe /K "${cdCommand}${tool}"`;
-    logger.log('Windows launch (generic tool fallback)', { command, app, toolCommand, vaultPath });
-    return { command, cwd: vaultPath };
+    return null;
 };
-const buildUnixLaunch = (terminalApp, vaultPath, toolCommand) => {
+const buildUnixLaunch = (terminalApp, vaultPath, toolCommand, options) => {
     const app = sanitizeTerminalApp(terminalApp);
     if (!app) {
         return null;
     }
     if (!toolCommand) {
-        const command = `${app}`;
-        logger.log('Unix launch (simple)', { command, vaultPath });
-        return { command, cwd: vaultPath };
+        return {
+            executable: app,
+            args: [],
+            cwd: vaultPath
+        };
     }
-    const shellCommand = `cd \\\"$PWD\\\"; ${toolCommand}; exec \\\"$SHELL\\\"`;
-    if (app.includes('gnome-terminal')) {
-        const command = `${app} -- bash -lc "${shellCommand}"`;
-        logger.log('Unix launch (gnome-terminal)', { command, toolCommand, vaultPath });
-        return { command, cwd: vaultPath };
+    const shellCommand = options?.keepTerminalOpen === false ? toolCommand : `${toolCommand}; exec "$SHELL"`;
+    return {
+        executable: app,
+        args: app.includes('gnome-terminal')
+            ? ['--', 'bash', '-lc', shellCommand]
+            : ['-e', 'bash', '-lc', shellCommand],
+        cwd: vaultPath
+    };
+};
+const buildLaunchCommandForPlatform = (platform, terminalApp, vaultPath, toolCommand, options) => {
+    if (platform === 'macos') {
+        return buildMacLaunch(terminalApp, vaultPath, toolCommand, options);
     }
-    if (app.includes('konsole')) {
-        const command = `${app} -e bash -lc "${shellCommand}"`;
-        logger.log('Unix launch (konsole)', { command, toolCommand, vaultPath });
-        return { command, cwd: vaultPath };
+    if (platform === 'windows') {
+        return buildWindowsLaunch(terminalApp, vaultPath, toolCommand, options);
     }
-    const command = `${app} -e bash -lc "${shellCommand}"`;
-    logger.log('Unix launch (generic tool)', { command, toolCommand, vaultPath });
-    return { command, cwd: vaultPath };
+    return buildUnixLaunch(terminalApp, vaultPath, toolCommand, options);
 };
 const buildLaunchCommand = (terminalApp, vaultPath, toolCommand, options) => {
     if (!obsidian.Platform.isDesktopApp) {
         return null;
     }
     if (obsidian.Platform.isMacOS) {
-        return buildMacLaunch(terminalApp, vaultPath, toolCommand, options);
+        return buildLaunchCommandForPlatform('macos', terminalApp, vaultPath, toolCommand, options);
     }
     if (obsidian.Platform.isWin) {
-        return buildWindowsLaunch(terminalApp, vaultPath, toolCommand);
+        return buildLaunchCommandForPlatform('windows', terminalApp, vaultPath, toolCommand, options);
     }
-    return buildUnixLaunch(terminalApp, vaultPath, toolCommand);
+    return buildLaunchCommandForPlatform('unix', terminalApp, vaultPath, toolCommand, options);
 };
 
+const CURRENT_SETTINGS_VERSION = 3;
+const INITIAL_TERMINAL_ID = 'terminal-1';
+const WINDOWS_POWERSHELL_TERMINAL_ID = 'terminal-powershell';
 const DEFAULT_COMMANDS = [
     {
+        id: 'open-terminal',
+        kind: 'open-terminal',
+        name: 'Open in terminal',
+        command: '',
+        workingDirectory: 'vault',
+        keepTerminalOpen: true
+    },
+    {
         id: 'claude',
+        kind: 'shell-command',
         name: 'Open in Claude Code',
         command: 'claude',
-        workingDirectory: 'vault'
+        workingDirectory: 'vault',
+        keepTerminalOpen: true
     },
     {
         id: 'codex',
+        kind: 'shell-command',
         name: 'Open in Codex cli',
         command: 'codex',
-        workingDirectory: 'vault'
+        workingDirectory: 'vault',
+        keepTerminalOpen: true
     },
     {
-        id: 'Antigravity',
+        id: 'antigravity',
+        kind: 'shell-command',
         name: 'Open in Antigravity',
         command: 'agy --dangerously-skip-permissions',
-        workingDirectory: 'vault'
+        workingDirectory: 'vault',
+        keepTerminalOpen: true
     },
     {
         id: 'opencode',
+        kind: 'shell-command',
         name: 'Open in OpenCode',
         command: 'opencode',
-        workingDirectory: 'vault'
+        workingDirectory: 'vault',
+        keepTerminalOpen: true
     },
     {
         id: 'git-pull',
+        kind: 'shell-command',
         name: 'Git: pull',
         command: 'git pull',
-        workingDirectory: 'vault'
+        workingDirectory: 'vault',
+        keepTerminalOpen: true
     },
     {
-        id: 'git-commit-push',
-        name: 'Git: commit and push',
-        command: 'git add . && git commit -m "Temp" && git push',
-        workingDirectory: 'vault'
+        id: 'vscode',
+        kind: 'shell-command',
+        name: 'Open in VS Code',
+        command: 'code .',
+        workingDirectory: 'vault',
+        keepTerminalOpen: false
     }
 ];
-const defaultTerminalApp = () => {
+const WINDOWS_DEFAULT_COMMANDS = [
+    {
+        id: 'file-explorer',
+        kind: 'shell-command',
+        name: 'Open in File Explorer',
+        command: 'explorer .',
+        workingDirectory: 'vault',
+        keepTerminalOpen: false
+    }
+];
+const defaultTerminalName = () => {
     if (!obsidian.Platform.isDesktopApp) {
         return '';
     }
@@ -289,10 +367,74 @@ const defaultTerminalApp = () => {
         return 'Terminal';
     }
     if (obsidian.Platform.isWin) {
-        return 'cmd.exe';
+        return 'cmd';
     }
     if (obsidian.Platform.isLinux) {
         return 'x-terminal-emulator';
+    }
+    return '';
+};
+const resolveExecutableFromPath = (value) => {
+    const executable = value.trim().replace(/^"(.*)"$/, '$1');
+    if (!executable) {
+        return '';
+    }
+    const isExecutableAbsolute = obsidian.Platform.isWin
+        ? node_path.win32.isAbsolute(executable)
+        : node_path.isAbsolute(executable);
+    if (isExecutableAbsolute) {
+        return executable;
+    }
+    const extensions = obsidian.Platform.isWin && !node_path.win32.extname(executable)
+        ? ['', '.exe']
+        : [''];
+    for (const directory of (process.env.PATH ?? '').split(node_path.delimiter)) {
+        if (!directory) {
+            continue;
+        }
+        for (const extension of extensions) {
+            const candidate = node_path.join(directory, `${executable}${extension}`);
+            if (node_fs.existsSync(candidate)) {
+                return candidate;
+            }
+        }
+    }
+    return executable;
+};
+const defaultWindowsCmdApp = () => {
+    const windowsRoot = process.env.SystemRoot ?? process.env.WINDIR;
+    if (windowsRoot) {
+        const systemCmd = node_path.win32.join(windowsRoot, 'System32', 'cmd.exe');
+        if (node_fs.existsSync(systemCmd)) {
+            return systemCmd;
+        }
+    }
+    return resolveExecutableFromPath(process.env.ComSpec ?? 'cmd.exe');
+};
+const normalizeExecutablePath = (value) => {
+    const resolved = resolveExecutableFromPath(value);
+    if (!obsidian.Platform.isWin || node_path.win32.basename(resolved).toLowerCase() !== 'cmd.exe') {
+        return resolved;
+    }
+    const defaultCmd = defaultWindowsCmdApp();
+    return node_path.win32.normalize(resolved).toLowerCase() ===
+        node_path.win32.normalize(defaultCmd).toLowerCase()
+        ? defaultCmd
+        : resolved;
+};
+const defaultTerminalApp = () => {
+    if (!obsidian.Platform.isDesktopApp) {
+        return '';
+    }
+    if (obsidian.Platform.isWin) {
+        return defaultWindowsCmdApp();
+    }
+    if (obsidian.Platform.isMacOS) {
+        const terminalApp = '/System/Applications/Utilities/Terminal.app';
+        return node_fs.existsSync(terminalApp) ? terminalApp : 'Terminal';
+    }
+    if (obsidian.Platform.isLinux) {
+        return resolveExecutableFromPath('x-terminal-emulator');
     }
     return '';
 };
@@ -319,15 +461,46 @@ const buildDefaultTerminalAppSetting = () => {
     }
     return { [platform]: app };
 };
-const cloneDefaultCommands = () => DEFAULT_COMMANDS.map((command) => (Object.assign({}, command)));
+const buildDefaultTerminalProfile = (applications = buildDefaultTerminalAppSetting()) => ({
+    id: INITIAL_TERMINAL_ID,
+    name: defaultTerminalName(),
+    applications
+});
+const defaultWindowsPowerShellApp = () => {
+    const windowsRoot = process.env.SystemRoot ?? process.env.WINDIR;
+    if (windowsRoot) {
+        const systemPowerShell = node_path.win32.join(windowsRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+        if (node_fs.existsSync(systemPowerShell)) {
+            return systemPowerShell;
+        }
+    }
+    return resolveExecutableFromPath('powershell.exe');
+};
+const buildDefaultWindowsPowerShellProfile = () => ({
+    id: WINDOWS_POWERSHELL_TERMINAL_ID,
+    name: 'powershell',
+    applications: { win: defaultWindowsPowerShellApp() }
+});
+const createDefaultTerminalProfiles = () => obsidian.Platform.isWin
+    ? [buildDefaultTerminalProfile(), buildDefaultWindowsPowerShellProfile()]
+    : [buildDefaultTerminalProfile()];
+const cloneDefaultCommands = () => {
+    const commands = obsidian.Platform.isWin
+        ? [...DEFAULT_COMMANDS, ...WINDOWS_DEFAULT_COMMANDS]
+        : DEFAULT_COMMANDS;
+    return commands.map((command) => ({
+        ...command,
+        terminalId: INITIAL_TERMINAL_ID
+    }));
+};
 const DEFAULT_SETTINGS = {
-    terminalApp: buildDefaultTerminalAppSetting(),
+    settingsVersion: CURRENT_SETTINGS_VERSION,
+    terminals: createDefaultTerminalProfiles(),
     reuseExistingMacApp: true,
     commands: cloneDefaultCommands()
 };
 const isRecord = (value) => typeof value === 'object' && value !== null;
 const normalizeTerminalAppSetting = (value, fallback) => {
-    var _a;
     const platform = getCurrentDesktopPlatform();
     if (isRecord(value)) {
         const next = {};
@@ -340,12 +513,18 @@ const normalizeTerminalAppSetting = (value, fallback) => {
         if (typeof value.linux === 'string') {
             next.linux = value.linux.trim();
         }
+        const platform = getCurrentDesktopPlatform();
+        if (platform && next[platform]) {
+            next[platform] = normalizeExecutablePath(next[platform]);
+        }
         return next;
     }
     if (!platform) {
-        return Object.assign({}, fallback);
+        return { ...fallback };
     }
-    return { [platform]: (_a = fallback[platform]) !== null && _a !== void 0 ? _a : '' };
+    return {
+        [platform]: normalizeExecutablePath(fallback[platform] ?? '')
+    };
 };
 const readBoolean = (value, fallback) => typeof value === 'boolean' ? value : fallback;
 const normalizeWorkingDirectory = (value) => value === 'current-note' ? 'current-note' : 'vault';
@@ -356,16 +535,44 @@ const normalizeId = (value) => {
     const normalized = value.trim().toLowerCase();
     return /^[a-z0-9][a-z0-9-]*$/.test(normalized) ? normalized : null;
 };
-const createUniqueId = (usedIds) => {
+const createUniqueId = (usedIds, prefix) => {
     let id;
     do {
-        id = `command-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+        id = `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
     } while (usedIds.has(id));
     return id;
 };
-const normalizeCommands = (value) => {
+const normalizeTerminalProfiles = (value, legacyTerminalApp) => {
     if (!Array.isArray(value)) {
-        return cloneDefaultCommands();
+        return [
+            buildDefaultTerminalProfile(normalizeTerminalAppSetting(legacyTerminalApp, buildDefaultTerminalAppSetting()))
+        ];
+    }
+    const usedIds = new Set();
+    const terminals = [];
+    for (const item of value) {
+        if (!isRecord(item)) {
+            continue;
+        }
+        let id = normalizeId(item.id);
+        if (!id || usedIds.has(id)) {
+            id = createUniqueId(usedIds, 'terminal');
+        }
+        usedIds.add(id);
+        terminals.push({
+            id,
+            name: typeof item.name === 'string' ? item.name : '',
+            applications: normalizeTerminalAppSetting(item.applications, buildDefaultTerminalAppSetting())
+        });
+    }
+    return terminals.length > 0 ? terminals : createDefaultTerminalProfiles();
+};
+const normalizeCommands = (value, terminalIds, fallbackTerminalId) => {
+    if (!Array.isArray(value)) {
+        return cloneDefaultCommands().map((command) => ({
+            ...command,
+            terminalId: fallbackTerminalId
+        }));
     }
     const usedIds = new Set();
     const commands = [];
@@ -375,62 +582,153 @@ const normalizeCommands = (value) => {
         }
         let id = normalizeId(item.id);
         if (!id || usedIds.has(id)) {
-            id = createUniqueId(usedIds);
+            id = createUniqueId(usedIds, 'command');
         }
         usedIds.add(id);
+        const terminalId = normalizeId(item.terminalId);
+        const kind = item.kind === 'open-terminal' ? 'open-terminal' : 'shell-command';
         commands.push({
             id,
+            kind,
             name: typeof item.name === 'string' ? item.name : '',
-            command: typeof item.command === 'string' ? item.command : '',
-            workingDirectory: normalizeWorkingDirectory(item.workingDirectory)
+            command: kind === 'open-terminal'
+                ? ''
+                : typeof item.command === 'string'
+                    ? item.command
+                    : '',
+            workingDirectory: normalizeWorkingDirectory(item.workingDirectory),
+            keepTerminalOpen: kind === 'open-terminal'
+                ? true
+                : readBoolean(item.keepTerminalOpen, true),
+            terminalId: terminalId && terminalIds.has(terminalId)
+                ? terminalId
+                : fallbackTerminalId
         });
     }
     return commands;
 };
-const createCommand = (existing) => {
+const createCommand = (existing, terminalId) => {
     const usedIds = new Set(existing.map((command) => command.id));
     return {
-        id: createUniqueId(usedIds),
+        id: createUniqueId(usedIds, 'command'),
+        kind: 'shell-command',
         name: '',
         command: '',
-        workingDirectory: 'vault'
+        workingDirectory: 'vault',
+        keepTerminalOpen: true,
+        terminalId
     };
+};
+const createTerminalProfile = (existing) => {
+    const usedIds = new Set(existing.map((terminal) => terminal.id));
+    return {
+        id: createUniqueId(usedIds, 'terminal'),
+        name: '',
+        applications: {}
+    };
+};
+const addMigratedOpenTerminalCommand = (commands, terminalId) => {
+    if (commands.some((command) => command.kind === 'open-terminal')) {
+        return;
+    }
+    const usedIds = new Set(commands.map((command) => command.id));
+    const id = usedIds.has('open-terminal')
+        ? createUniqueId(usedIds, 'open-terminal')
+        : 'open-terminal';
+    commands.unshift({
+        id,
+        kind: 'open-terminal',
+        name: 'Open in terminal',
+        command: '',
+        workingDirectory: 'vault',
+        keepTerminalOpen: true,
+        terminalId
+    });
+};
+const addMigratedWindowsPowerShellTerminal = (terminals) => {
+    if (!obsidian.Platform.isWin) {
+        return;
+    }
+    const hasWindowsPowerShell = terminals.some((terminal) => {
+        const executableName = node_path.win32.basename(terminal.applications.win ?? '').toLowerCase();
+        return executableName === 'powershell' || executableName === 'powershell.exe';
+    });
+    if (hasWindowsPowerShell) {
+        return;
+    }
+    const profile = buildDefaultWindowsPowerShellProfile();
+    const usedIds = new Set(terminals.map((terminal) => terminal.id));
+    if (usedIds.has(profile.id)) {
+        profile.id = createUniqueId(usedIds, 'terminal-powershell');
+    }
+    terminals.push(profile);
 };
 const normalizeSettings = (stored) => {
     const source = isRecord(stored) ? stored : {};
+    const terminals = normalizeTerminalProfiles(source.terminals, source.terminalApp);
+    const fallbackTerminalId = terminals[0]?.id ?? INITIAL_TERMINAL_ID;
+    const commands = normalizeCommands(source.commands, new Set(terminals.map((terminal) => terminal.id)), fallbackTerminalId);
+    const storedVersion = typeof source.settingsVersion === 'number' ? source.settingsVersion : 0;
+    if (storedVersion < 1) {
+        addMigratedOpenTerminalCommand(commands, fallbackTerminalId);
+    }
+    if (storedVersion < 2) {
+        addMigratedWindowsPowerShellTerminal(terminals);
+    }
     return {
-        terminalApp: normalizeTerminalAppSetting(source.terminalApp, DEFAULT_SETTINGS.terminalApp),
+        settingsVersion: CURRENT_SETTINGS_VERSION,
+        terminals,
         reuseExistingMacApp: readBoolean(source.reuseExistingMacApp, DEFAULT_SETTINGS.reuseExistingMacApp),
-        commands: normalizeCommands(source.commands)
+        commands
     };
 };
+const restoreDefaultTerminalProfiles = (settings) => {
+    const defaultTerminals = createDefaultTerminalProfiles();
+    const defaultTerminalIds = new Set(defaultTerminals.map((terminal) => terminal.id));
+    const fallbackTerminalId = defaultTerminals[0]?.id ?? '';
+    settings.terminals = defaultTerminals;
+    for (const command of settings.commands) {
+        if (!defaultTerminalIds.has(command.terminalId)) {
+            command.terminalId = fallbackTerminalId;
+        }
+    }
+};
+const resolveTerminalProfile = (settings, terminalId) => settings.terminals.find((terminal) => terminal.id === terminalId) ??
+    settings.terminals[0];
 const getCurrentTerminalApp = (terminalApp) => {
-    var _a;
     const platform = getCurrentDesktopPlatform();
     if (!platform) {
         return '';
     }
-    return (_a = terminalApp[platform]) !== null && _a !== void 0 ? _a : '';
+    return terminalApp[platform] ?? '';
 };
 const setCurrentTerminalApp = (terminalApp, value) => {
     const platform = getCurrentDesktopPlatform();
     if (!platform) {
-        return Object.assign({}, terminalApp);
+        return { ...terminalApp };
     }
-    return Object.assign(Object.assign({}, terminalApp), { [platform]: value.trim() });
+    return {
+        ...terminalApp,
+        [platform]: value.trim()
+    };
 };
 
 const SAVE_DELAY_MS = 250;
-class DeleteCommandModal extends obsidian.Modal {
-    constructor(app, commandName, confirmDelete) {
+const TERMINAL_DROPDOWN_WIDTH = '112px';
+class DeleteItemModal extends obsidian.Modal {
+    itemType;
+    itemName;
+    confirmDelete;
+    constructor(app, itemType, itemName, confirmDelete) {
         super(app);
-        this.commandName = commandName;
+        this.itemType = itemType;
+        this.itemName = itemName;
         this.confirmDelete = confirmDelete;
     }
     onOpen() {
-        this.setTitle('Delete command');
+        this.setTitle(`Delete ${this.itemType}`);
         this.contentEl.createEl('p', {
-            text: `Delete "${this.commandName}"? This action cannot be undone.`
+            text: `Delete "${this.itemName}"? This action cannot be undone.`
         });
         const actions = new obsidian.Setting(this.contentEl);
         actions.settingEl.addClass('terminal-commands-delete-actions');
@@ -440,7 +738,7 @@ class DeleteCommandModal extends obsidian.Modal {
         });
         actions.addButton((button) => button
             .setButtonText('Delete')
-            .setWarning()
+            .setDestructive()
             .onClick(() => {
             this.close();
             this.confirmDelete();
@@ -450,293 +748,455 @@ class DeleteCommandModal extends obsidian.Modal {
         this.contentEl.empty();
     }
 }
+class RestoreTerminalsModal extends obsidian.Modal {
+    confirmRestore;
+    constructor(app, confirmRestore) {
+        super(app);
+        this.confirmRestore = confirmRestore;
+    }
+    onOpen() {
+        this.setTitle('Restore default terminals');
+        this.contentEl.createEl('p', {
+            text: 'Replace the terminal list with the platform defaults? Custom terminals will be removed, and their commands will use the first default terminal.'
+        });
+        const actions = new obsidian.Setting(this.contentEl);
+        actions.settingEl.addClass('terminal-commands-delete-actions');
+        actions.addButton((button) => {
+            button.setButtonText('Cancel').onClick(() => this.close());
+            button.buttonEl.focus();
+        });
+        actions.addButton((button) => button
+            .setButtonText('Restore')
+            .setDestructive()
+            .onClick(() => {
+            this.close();
+            this.confirmRestore();
+        }));
+    }
+    onClose() {
+        this.contentEl.empty();
+    }
+}
 class TerminalCommandsSettingTab extends obsidian.PluginSettingTab {
+    plugin;
+    commandListObserver = null;
+    saveTimer = null;
     constructor(app, plugin) {
         super(app, plugin);
-        this.draggedCommandId = null;
-        this.dropIndicatorRow = null;
-        this.dropTargetIndex = null;
-        this.saveTimer = null;
         this.plugin = plugin;
     }
-    display() {
-        const { containerEl } = this;
-        containerEl.empty();
-        this.displayGeneralSettings(containerEl);
-        this.displayCommands(containerEl);
+    getSettingDefinitions() {
+        const definitions = [];
+        if (obsidian.Platform.isMacOS) {
+            definitions.push({
+                type: 'group',
+                heading: 'Terminal integration',
+                items: [
+                    {
+                        name: 'Reuse existing terminal instance',
+                        desc: 'Reuse the configured macOS terminal app instead of launching a new instance.',
+                        visible: obsidian.Platform.isMacOS,
+                        control: {
+                            type: 'toggle',
+                            key: 'reuseExistingMacApp'
+                        }
+                    }
+                ]
+            });
+        }
+        definitions.push(this.getTerminalDefinitions(), this.getCommandDefinitions());
+        this.observeCommandList();
+        return definitions;
     }
     hide() {
         this.flushScheduledSave();
-        this.clearDragState();
     }
-    displayGeneralSettings(containerEl) {
-        new obsidian.Setting(containerEl).setName('Terminal integration').setHeading();
-        new obsidian.Setting(containerEl)
-            .setName('Terminal application name')
-            .setDesc('Enter the command line app to launch, such as the default shell or a custom executable path.')
-            .addText((text) => text
-            .setPlaceholder(defaultTerminalApp())
-            .setValue(getCurrentTerminalApp(this.plugin.settings.terminalApp))
-            .onChange((value) => __awaiter(this, void 0, void 0, function* () {
-            this.plugin.settings.terminalApp = setCurrentTerminalApp(this.plugin.settings.terminalApp, value);
-            yield this.plugin.saveSettings();
-        })));
-        if (obsidian.Platform.isMacOS) {
-            new obsidian.Setting(containerEl)
-                .setName('Reuse existing Terminal instance')
-                .setDesc('Use macOS open -a to reuse the configured Terminal app. Turn this off to launch a new instance.')
-                .addToggle((toggle) => toggle.setValue(this.plugin.settings.reuseExistingMacApp).onChange((value) => __awaiter(this, void 0, void 0, function* () {
-                this.plugin.settings.reuseExistingMacApp = value;
-                yield this.plugin.saveSettings();
-            })));
-        }
+    dispose() {
+        this.commandListObserver?.disconnect();
+        this.commandListObserver = null;
+        this.flushScheduledSave();
     }
-    displayCommands(containerEl) {
-        new obsidian.Setting(containerEl)
-            .setName('Commands')
-            .setHeading()
-            .addButton((button) => button
-            .setButtonText('Add command')
-            .setCta()
-            .onClick(() => __awaiter(this, void 0, void 0, function* () {
-            this.plugin.settings.commands.push(createCommand(this.plugin.settings.commands));
-            yield this.saveImmediately();
-            this.display();
-        })));
-        const scrollEl = containerEl.createDiv({ cls: 'terminal-commands-command-table-scroll' });
-        const tableEl = scrollEl.createEl('table', { cls: 'terminal-commands-command-table' });
-        this.displayColumnWidths(tableEl);
-        const headerRow = tableEl.createEl('thead').createEl('tr');
-        this.createHeaderCell(headerRow, '', 'Drag handle');
-        this.createHeaderCell(headerRow, 'Name');
-        this.createHeaderCell(headerRow, 'Command');
-        this.createHeaderCell(headerRow, 'Working directory');
-        this.createHeaderCell(headerRow, '', 'Delete command');
-        const bodyEl = tableEl.createEl('tbody');
-        this.attachTableBodyDropEvents(bodyEl);
-        if (this.plugin.settings.commands.length === 0) {
-            const emptyCell = bodyEl.createEl('tr').createEl('td', {
-                cls: 'terminal-commands-empty-state',
-                text: 'No commands. Add a command to create a command palette entry.'
-            });
-            emptyCell.colSpan = 5;
-            return;
-        }
-        this.plugin.settings.commands.forEach((command, index) => {
-            this.displayCommandRow(bodyEl, command, index);
-        });
+    getTerminalDefinitions() {
+        return {
+            type: 'list',
+            heading: 'Terminals',
+            cls: 'terminal-commands-terminals-list',
+            emptyState: 'At least one terminal is required.',
+            addItem: {
+                name: 'Add terminal',
+                action: () => {
+                    void this.addTerminal();
+                }
+            },
+            onDelete: (index) => {
+                const terminal = this.plugin.settings.terminals[index];
+                if (terminal) {
+                    this.confirmTerminalDelete(terminal, index);
+                }
+            },
+            items: this.plugin.settings.terminals.map((terminal, index) => ({
+                name: terminal.id,
+                searchable: false,
+                render: (setting) => {
+                    this.renderTerminalControls(setting, terminal, index);
+                }
+            }))
+        };
     }
-    displayColumnWidths(tableEl) {
-        const colgroup = tableEl.createEl('colgroup');
-        colgroup.createEl('col', { cls: 'terminal-commands-col-drag' });
-        colgroup.createEl('col', { cls: 'terminal-commands-col-name' });
-        colgroup.createEl('col', { cls: 'terminal-commands-col-command' });
-        colgroup.createEl('col', { cls: 'terminal-commands-col-directory' });
-        colgroup.createEl('col', { cls: 'terminal-commands-col-delete' });
-    }
-    createHeaderCell(row, text, label) {
-        const cell = row.createEl('th', { text });
-        cell.scope = 'col';
-        if (label) {
-            cell.setAttribute('aria-label', label);
-        }
-    }
-    displayCommandRow(bodyEl, command, index) {
-        const rowEl = bodyEl.createEl('tr', { cls: 'terminal-commands-command-row' });
-        rowEl.dataset.commandId = command.id;
-        const dragCell = rowEl.createEl('td', { cls: 'terminal-commands-icon-cell' });
-        const dragHandle = this.createIconButton(dragCell, 'grip-vertical', `Drag ${command.name || `command ${index + 1}`}`, 'terminal-commands-drag-handle');
-        dragHandle.draggable = true;
-        this.attachCommandDragEvents(rowEl, dragHandle, command.id, index);
-        const nameCell = rowEl.createEl('td');
-        const nameInput = nameCell.createEl('input', {
-            attr: { type: 'text', 'aria-label': 'Command palette name', placeholder: 'Name' }
-        });
-        nameInput.value = command.name;
-        nameInput.addEventListener('input', () => {
-            command.name = nameInput.value;
-            this.scheduleSave();
-        });
-        const commandCell = rowEl.createEl('td');
-        const commandInput = commandCell.createEl('input', {
-            attr: { type: 'text', 'aria-label': 'Shell command', placeholder: 'Command' }
-        });
-        commandInput.value = command.command;
-        commandInput.addEventListener('input', () => {
-            command.command = commandInput.value;
-            this.scheduleSave();
-        });
-        const directoryCell = rowEl.createEl('td');
-        const workingDirectorySelect = directoryCell.createEl('select', {
-            attr: { 'aria-label': 'Working directory' }
-        });
-        this.addSelectOption(workingDirectorySelect, 'current-note', 'Current note folder');
-        this.addSelectOption(workingDirectorySelect, 'vault', 'Vault root');
-        workingDirectorySelect.value = command.workingDirectory;
-        workingDirectorySelect.addEventListener('change', () => {
-            command.workingDirectory = workingDirectorySelect.value;
-            void this.saveImmediately();
-        });
-        const deleteCell = rowEl.createEl('td', { cls: 'terminal-commands-icon-cell' });
-        const deleteButton = this.createIconButton(deleteCell, 'trash-2', `Delete ${command.name || `command ${index + 1}`}`, 'terminal-commands-delete-button');
-        deleteButton.addEventListener('click', () => {
-            const displayName = command.name.trim() || `command ${index + 1}`;
-            new DeleteCommandModal(this.app, displayName, () => {
-                this.plugin.settings.commands = this.plugin.settings.commands.filter((candidate) => candidate.id !== command.id);
-                void this.saveImmediately().then(() => this.display());
-            }).open();
-        });
-    }
-    createIconButton(parent, icon, label, className) {
-        const button = parent.createEl('button', {
-            cls: `clickable-icon ${className}`,
-            attr: { type: 'button', 'aria-label': label, title: label }
-        });
-        obsidian.setIcon(button, icon);
-        return button;
-    }
-    addSelectOption(select, value, label) {
-        const option = select.createEl('option', { text: label });
-        option.value = value;
-    }
-    attachCommandDragEvents(rowEl, handle, commandId, index) {
-        handle.addEventListener('dragstart', (event) => {
-            var _a;
-            this.draggedCommandId = commandId;
-            (_a = event.dataTransfer) === null || _a === void 0 ? void 0 : _a.setData('text/plain', commandId);
-            if (event.dataTransfer) {
-                event.dataTransfer.effectAllowed = 'move';
-            }
-            rowEl.addClass('is-dragging');
-        });
-        handle.addEventListener('dragend', () => {
-            this.clearDragState();
-        });
-        handle.addEventListener('keydown', (event) => {
-            if (!event.altKey || (event.key !== 'ArrowUp' && event.key !== 'ArrowDown')) {
-                return;
-            }
-            event.preventDefault();
-            this.moveCommandByOffset(commandId, event.key === 'ArrowUp' ? -1 : 1);
-        });
-        rowEl.addEventListener('dragover', (event) => {
-            if (!this.draggedCommandId) {
-                return;
-            }
-            event.preventDefault();
-            event.stopPropagation();
-            const after = event.clientY > rowEl.getBoundingClientRect().top + rowEl.offsetHeight / 2;
-            const bodyEl = rowEl.parentElement;
-            if (bodyEl instanceof HTMLTableSectionElement) {
-                this.showDropIndicator(bodyEl, rowEl, after, index + (after ? 1 : 0));
-            }
-        });
-        rowEl.addEventListener('drop', (event) => {
-            if (!this.draggedCommandId) {
-                return;
-            }
-            event.preventDefault();
-            event.stopPropagation();
-            const sourceId = this.draggedCommandId;
-            const targetIndex = this.dropTargetIndex;
-            if (targetIndex !== null) {
-                this.moveCommand(sourceId, targetIndex);
-            }
-        });
-    }
-    attachTableBodyDropEvents(bodyEl) {
-        bodyEl.addEventListener('dragover', (event) => {
-            if (!this.draggedCommandId) {
-                return;
-            }
-            event.preventDefault();
-            this.showDropIndicator(bodyEl, null, true, this.plugin.settings.commands.length);
-        });
-        bodyEl.addEventListener('drop', (event) => {
-            var _a;
-            if (!this.draggedCommandId) {
-                return;
-            }
-            event.preventDefault();
-            const targetIndex = (_a = this.dropTargetIndex) !== null && _a !== void 0 ? _a : this.plugin.settings.commands.length;
-            this.moveCommand(this.draggedCommandId, targetIndex);
-        });
-    }
-    showDropIndicator(bodyEl, referenceRow, after, targetIndex) {
-        if (!this.dropIndicatorRow) {
-            const indicatorRow = document.createElement('tr');
-            indicatorRow.addClass('terminal-commands-drop-indicator');
-            indicatorRow.setAttribute('aria-hidden', 'true');
-            indicatorRow.createEl('td', { cls: 'terminal-commands-drop-spacer' });
-            const lineCell = indicatorRow.createEl('td', {
-                cls: 'terminal-commands-drop-line-cell'
-            });
-            lineCell.colSpan = 4;
-            lineCell.createDiv({ cls: 'terminal-commands-drop-line' });
-            indicatorRow.addEventListener('dragover', (event) => {
-                event.preventDefault();
-                event.stopPropagation();
-            });
-            indicatorRow.addEventListener('drop', (event) => {
-                if (!this.draggedCommandId || this.dropTargetIndex === null) {
+    getCommandDefinitions() {
+        return {
+            type: 'list',
+            heading: 'Commands',
+            cls: 'terminal-commands-list',
+            emptyState: 'No commands. Add one to create a command palette entry.',
+            addItem: {
+                name: 'Add command',
+                action: () => {
+                    void this.addCommand();
+                }
+            },
+            onReorder: (oldIndex, newIndex) => {
+                const commands = this.plugin.settings.commands;
+                const [movedCommand] = commands.splice(oldIndex, 1);
+                if (!movedCommand) {
                     return;
                 }
-                event.preventDefault();
-                event.stopPropagation();
-                this.moveCommand(this.draggedCommandId, this.dropTargetIndex);
+                commands.splice(newIndex, 0, movedCommand);
+                void this.saveImmediately();
+            },
+            onDelete: (index) => {
+                const command = this.plugin.settings.commands[index];
+                if (command) {
+                    this.confirmCommandDelete(command, index);
+                }
+            },
+            items: this.plugin.settings.commands.map((command, index) => ({
+                name: command.id,
+                searchable: false,
+                render: (setting) => {
+                    this.renderCommandControls(setting, command, index);
+                }
+            }))
+        };
+    }
+    renderCommandControls(setting, command, index) {
+        setting.settingEl.addClass('terminal-commands-command-setting');
+        setting.settingEl.toggleClass('is-open-terminal', command.kind === 'open-terminal');
+        setting.settingEl.setAttribute('aria-label', command.name.trim() || `Command ${index + 1}`);
+        setting.infoEl.remove();
+        setting.controlEl.addClass('terminal-commands-command-controls');
+        setting.addText((text) => {
+            text.setPlaceholder('Name').setValue(command.name).onChange((value) => {
+                command.name = value;
+                this.scheduleSave();
             });
-            this.dropIndicatorRow = indicatorRow;
-        }
-        this.dropTargetIndex = targetIndex;
-        if (!referenceRow) {
-            bodyEl.appendChild(this.dropIndicatorRow);
-            return;
-        }
-        const insertionPoint = after ? referenceRow.nextSibling : referenceRow;
-        bodyEl.insertBefore(this.dropIndicatorRow, insertionPoint);
-    }
-    moveCommand(commandId, targetIndex) {
-        const commands = this.plugin.settings.commands;
-        const sourceIndex = commands.findIndex((command) => command.id === commandId);
-        if (sourceIndex < 0) {
-            this.clearDragState();
-            return;
-        }
-        const [moved] = commands.splice(sourceIndex, 1);
-        let insertionIndex = targetIndex;
-        if (sourceIndex < insertionIndex) {
-            insertionIndex -= 1;
-        }
-        insertionIndex = Math.max(0, Math.min(insertionIndex, commands.length));
-        commands.splice(insertionIndex, 0, moved);
-        this.finishReorder();
-    }
-    moveCommandByOffset(commandId, offset) {
-        const commands = this.plugin.settings.commands;
-        const sourceIndex = commands.findIndex((command) => command.id === commandId);
-        const targetIndex = sourceIndex + offset;
-        if (sourceIndex < 0 || targetIndex < 0 || targetIndex >= commands.length) {
-            return;
-        }
-        const [moved] = commands.splice(sourceIndex, 1);
-        commands.splice(targetIndex, 0, moved);
-        this.finishReorder();
-    }
-    finishReorder() {
-        this.clearDragState();
-        void this.saveImmediately().then(() => this.display());
-    }
-    clearDragState() {
-        var _a;
-        this.draggedCommandId = null;
-        this.dropTargetIndex = null;
-        (_a = this.dropIndicatorRow) === null || _a === void 0 ? void 0 : _a.remove();
-        this.dropIndicatorRow = null;
-        this.containerEl
-            .querySelectorAll('.is-dragging')
-            .forEach((element) => {
-            element.classList.remove('is-dragging');
+            text.inputEl.setAttribute('aria-label', 'Command palette name');
         });
+        setting.addText((text) => {
+            if (command.kind === 'open-terminal') {
+                text.setValue('').setDisabled(true);
+            }
+            else {
+                text.setPlaceholder('Command').setValue(command.command).onChange((value) => {
+                    command.command = value;
+                    this.scheduleSave();
+                });
+            }
+            text.inputEl.setAttribute('aria-label', 'Shell command');
+        });
+        setting.addDropdown((dropdown) => {
+            this.plugin.settings.terminals.forEach((terminal, terminalIndex) => {
+                dropdown.addOption(terminal.id, this.getTerminalDropdownLabel(terminal, terminalIndex));
+            });
+            dropdown.setValue(command.terminalId).onChange((value) => {
+                command.terminalId = value;
+                const selectedIndex = this.plugin.settings.terminals.findIndex((terminal) => terminal.id === value);
+                const selectedTerminal = this.plugin.settings.terminals[selectedIndex];
+                if (selectedTerminal) {
+                    dropdown.selectEl.setAttribute('title', this.getTerminalLabel(selectedTerminal, selectedIndex));
+                }
+                void this.saveImmediately();
+            });
+            dropdown.selectEl.setAttribute('aria-label', 'Terminal');
+            dropdown.selectEl.addClass('terminal-commands-terminal-dropdown');
+            dropdown.selectEl.setCssProps({
+                '--dropdown-fitted-width': TERMINAL_DROPDOWN_WIDTH
+            });
+            const selectedIndex = this.plugin.settings.terminals.findIndex((terminal) => terminal.id === command.terminalId);
+            const selectedTerminal = this.plugin.settings.terminals[selectedIndex];
+            if (selectedTerminal) {
+                dropdown.selectEl.setAttribute('title', this.getTerminalLabel(selectedTerminal, selectedIndex));
+            }
+        });
+        setting.addToggle((toggle) => {
+            toggle
+                .setValue(command.workingDirectory === 'current-note')
+                .setTooltip('Use current note folder')
+                .onChange((value) => {
+                command.workingDirectory = value ? 'current-note' : 'vault';
+                void this.saveImmediately();
+            });
+            toggle.toggleEl.setAttribute('aria-label', 'Use current note folder');
+        });
+        setting.addToggle((toggle) => {
+            toggle
+                .setValue(command.kind === 'open-terminal' ? true : command.keepTerminalOpen)
+                .setDisabled(command.kind === 'open-terminal')
+                .setTooltip('Keep terminal open')
+                .onChange((value) => {
+                if (command.kind === 'open-terminal') {
+                    return;
+                }
+                command.keepTerminalOpen = value;
+                void this.saveImmediately();
+            });
+            toggle.toggleEl.setAttribute('aria-label', 'Keep terminal open');
+        });
+        setting.controlEl.ownerDocument.defaultView?.queueMicrotask(() => {
+            const dragHandle = setting.controlEl.querySelector('.mod-drag-handle');
+            if (dragHandle) {
+                setting.controlEl.prepend(dragHandle);
+            }
+            if (command.kind === 'open-terminal') {
+                setting.controlEl
+                    .querySelector('.mod-delete')
+                    ?.remove();
+            }
+        });
+    }
+    renderTerminalControls(setting, terminal, index) {
+        setting.settingEl.addClass('terminal-commands-terminal-setting');
+        setting.settingEl.setAttribute('aria-label', this.getTerminalLabel(terminal, index));
+        setting.infoEl.remove();
+        setting.controlEl.addClass('terminal-commands-terminal-controls');
+        setting.addText((text) => {
+            text.setPlaceholder('Name').setValue(terminal.name).onChange((value) => {
+                terminal.name = value;
+                this.scheduleSave();
+            });
+            text.inputEl.setAttribute('aria-label', 'Terminal name');
+            text.inputEl.addEventListener('blur', () => this.update());
+        });
+        let pathInput = null;
+        setting.addText((text) => {
+            text.setPlaceholder('Select an executable').setValue(getCurrentTerminalApp(terminal.applications));
+            text.inputEl.readOnly = true;
+            pathInput = text.inputEl;
+            text.inputEl.setAttribute('aria-label', 'Terminal application');
+        });
+        const fileInput = setting.controlEl.createEl('input', {
+            cls: 'terminal-commands-terminal-file-input',
+            attr: { type: 'file', 'aria-hidden': 'true', tabIndex: '-1' }
+        });
+        if (obsidian.Platform.isWin) {
+            fileInput.accept = '.exe';
+        }
+        fileInput.addEventListener('change', () => {
+            const file = fileInput.files?.[0];
+            if (!file) {
+                return;
+            }
+            const executablePath = electron.webUtils.getPathForFile(file);
+            if (!executablePath) {
+                new obsidian.Notice('Unable to read the selected executable path.');
+                return;
+            }
+            if (obsidian.Platform.isWin && !executablePath.toLowerCase().endsWith('.exe')) {
+                new obsidian.Notice('Select a Windows .exe file.');
+                return;
+            }
+            if (obsidian.Platform.isWin && !isSupportedWindowsTerminalApp(executablePath)) {
+                new obsidian.Notice('Supported Windows terminals are cmd.exe, powershell.exe, and pwsh.exe.');
+                return;
+            }
+            terminal.applications = setCurrentTerminalApp(terminal.applications, executablePath);
+            if (pathInput) {
+                pathInput.value = executablePath;
+            }
+            fileInput.value = '';
+            void this.saveImmediately();
+        });
+        setting.addExtraButton((button) => {
+            button
+                .setIcon('folder-open')
+                .setTooltip('Select terminal executable')
+                .onClick(() => fileInput.click());
+        });
+    }
+    async addCommand() {
+        const command = createCommand(this.plugin.settings.commands, this.plugin.settings.terminals[0]?.id ?? '');
+        this.plugin.settings.commands.push(command);
+        await this.saveImmediately();
+        this.update();
+    }
+    async addTerminal() {
+        this.plugin.settings.terminals.push(createTerminalProfile(this.plugin.settings.terminals));
+        await this.saveImmediately();
+        this.update();
+    }
+    confirmCommandDelete(command, index) {
+        if (command.kind === 'open-terminal') {
+            new obsidian.Notice('Open in terminal cannot be deleted.');
+            return;
+        }
+        const displayName = command.name.trim() || `Command ${index + 1}`;
+        new DeleteItemModal(this.app, 'command', displayName, () => {
+            const currentIndex = this.plugin.settings.commands.findIndex((candidate) => candidate.id === command.id);
+            if (currentIndex < 0) {
+                return;
+            }
+            this.plugin.settings.commands.splice(currentIndex, 1);
+            void this.saveImmediately().then(() => this.update());
+        }).open();
+    }
+    confirmTerminalDelete(terminal, index) {
+        if (this.plugin.settings.terminals.length <= 1) {
+            new obsidian.Notice('At least one terminal is required.');
+            return;
+        }
+        const displayName = this.getTerminalLabel(terminal, index);
+        new DeleteItemModal(this.app, 'terminal', displayName, () => {
+            const terminalIndex = this.plugin.settings.terminals.findIndex((candidate) => candidate.id === terminal.id);
+            if (terminalIndex < 0) {
+                return;
+            }
+            this.plugin.settings.terminals.splice(terminalIndex, 1);
+            const fallbackTerminalId = this.plugin.settings.terminals[0]?.id ?? '';
+            for (const command of this.plugin.settings.commands) {
+                if (command.terminalId === terminal.id) {
+                    command.terminalId = fallbackTerminalId;
+                }
+            }
+            void this.saveImmediately().then(() => this.update());
+        }).open();
+    }
+    confirmRestoreTerminals() {
+        new RestoreTerminalsModal(this.app, () => {
+            restoreDefaultTerminalProfiles(this.plugin.settings);
+            void this.saveImmediately().then(() => this.update());
+        }).open();
+    }
+    getTerminalLabel(terminal, index) {
+        return terminal.name.trim() || `Terminal ${index + 1}`;
+    }
+    getTerminalDropdownLabel(terminal, index) {
+        const label = this.getTerminalLabel(terminal, index);
+        const characters = [...label];
+        return characters.length > 8
+            ? `${characters.slice(0, 8).join('')}…`
+            : label;
+    }
+    observeCommandList() {
+        if (!this.commandListObserver) {
+            const ViewMutationObserver = this.containerEl.ownerDocument.defaultView?.MutationObserver;
+            if (ViewMutationObserver) {
+                this.commandListObserver = new ViewMutationObserver(() => {
+                    this.addCommandListChrome();
+                });
+                this.commandListObserver.observe(this.containerEl, {
+                    childList: true,
+                    subtree: true
+                });
+            }
+        }
+        this.addCommandListChrome();
+    }
+    addCommandListChrome() {
+        const terminalGroupEl = this.containerEl.querySelector('.terminal-commands-terminals-list');
+        const terminalHeadingEl = terminalGroupEl?.querySelector('.setting-item-heading');
+        const terminalHeadingControlsEl = terminalHeadingEl?.querySelector('.setting-item-control');
+        if (terminalHeadingControlsEl &&
+            !terminalHeadingControlsEl.querySelector('.terminal-commands-restore-terminals')) {
+            const restoreButton = new obsidian.ButtonComponent(terminalHeadingControlsEl)
+                .setButtonText('Restore defaults')
+                .setTooltip('Restore the platform default terminal list')
+                .setClass('terminal-commands-restore-terminals')
+                .onClick(() => this.confirmRestoreTerminals());
+            terminalHeadingControlsEl.prepend(restoreButton.buttonEl);
+        }
+        if (terminalGroupEl &&
+            terminalHeadingEl &&
+            !terminalGroupEl.querySelector('.terminal-commands-group-description')) {
+            const terminalDescriptionEl = terminalGroupEl.createDiv({
+                cls: 'terminal-commands-group-description',
+                text: this.getTerminalGroupDescription()
+            });
+            terminalHeadingEl.after(terminalDescriptionEl);
+        }
+        const terminalListEl = terminalGroupEl?.querySelector('.setting-items');
+        if (terminalListEl &&
+            !terminalListEl.querySelector('.terminal-commands-terminal-column-headers')) {
+            const terminalHeadersEl = terminalListEl.createDiv({
+                cls: 'terminal-commands-terminal-column-headers',
+                attr: { role: 'row' }
+            });
+            for (const [label, centered] of [
+                ['Name', false],
+                ['Path', false],
+                ['Browse', true],
+                ['Delete', true]
+            ]) {
+                terminalHeadersEl.createDiv({
+                    cls: `terminal-commands-column-header${centered ? ' is-centered' : ''}`,
+                    text: label,
+                    attr: { role: 'columnheader' }
+                });
+            }
+            terminalListEl.prepend(terminalHeadersEl);
+        }
+        const groupEl = this.containerEl.querySelector('.terminal-commands-list');
+        if (!groupEl) {
+            return;
+        }
+        const headingEl = groupEl.querySelector('.setting-item-heading');
+        if (headingEl && !groupEl.querySelector('.terminal-commands-group-description')) {
+            const descriptionEl = groupEl.createDiv({
+                cls: 'terminal-commands-group-description'
+            });
+            descriptionEl.createDiv({
+                text: 'Note folder: on uses the note folder; off uses the Vault folder.'
+            });
+            descriptionEl.createDiv({
+                text: 'Keep open: on keeps the terminal open after the command finishes; off closes it.'
+            });
+            headingEl.after(descriptionEl);
+        }
+        const listEl = groupEl.querySelector('.setting-items');
+        if (!listEl || listEl.querySelector('.terminal-commands-column-headers')) {
+            return;
+        }
+        const headersEl = listEl.createDiv({
+            cls: 'terminal-commands-column-headers',
+            attr: { role: 'row' }
+        });
+        for (const [label, centered] of [
+            ['Sort', true],
+            ['Name', false],
+            ['Command', false],
+            ['Terminal', false],
+            ['Note folder', true],
+            ['Keep open', true],
+            ['Delete', true]
+        ]) {
+            headersEl.createDiv({
+                cls: `terminal-commands-column-header${centered ? ' is-centered' : ''}`,
+                text: label,
+                attr: { role: 'columnheader' }
+            });
+        }
+        listEl.prepend(headersEl);
+    }
+    getTerminalGroupDescription() {
+        if (obsidian.Platform.isWin) {
+            return 'Supported terminals: Command Prompt (cmd), Windows PowerShell, and PowerShell 7 (pwsh). Other .exe files are rejected.';
+        }
+        if (obsidian.Platform.isMacOS) {
+            return 'Supported terminals: Terminal and terminal apps that can open .command scripts.';
+        }
+        if (obsidian.Platform.isLinux) {
+            return 'Supported terminals: GNOME Terminal and terminals compatible with -e bash -lc.';
+        }
+        return 'Terminal launching is available in the Obsidian desktop app.';
     }
     scheduleSave() {
         if (this.saveTimer !== null) {
@@ -755,61 +1215,32 @@ class TerminalCommandsSettingTab extends obsidian.PluginSettingTab {
         this.saveTimer = null;
         void this.plugin.saveSettings();
     }
-    saveImmediately() {
-        return __awaiter(this, void 0, void 0, function* () {
-            if (this.saveTimer !== null) {
-                window.clearTimeout(this.saveTimer);
-                this.saveTimer = null;
-            }
-            yield this.plugin.saveSettings();
-        });
+    async saveImmediately() {
+        if (this.saveTimer !== null) {
+            window.clearTimeout(this.saveTimer);
+            this.saveTimer = null;
+        }
+        await this.plugin.saveSettings();
     }
 }
 
-const buildLaunchTargets = (settings) => {
-    const targets = [
-        {
-            id: 'open-terminal',
-            commandName: 'Open in terminal',
-            workingDirectory: 'vault'
-        }
-    ];
-    for (const configuredCommand of settings.commands) {
-        const name = configuredCommand.name.trim();
-        const command = configuredCommand.command.trim();
-        if (!name || !command) {
-            continue;
-        }
-        targets.push({
-            id: `open-${configuredCommand.id}`,
-            commandName: name,
-            toolCommand: command,
-            workingDirectory: configuredCommand.workingDirectory
-        });
-    }
-    return targets;
-};
-
-const TEMP_SCRIPT_CLEANUP_DELAY_MS = 30000;
+const TEMP_SCRIPT_CLEANUP_DELAY_MS = 30_000;
 class TerminalCommandsPlugin extends obsidian.Plugin {
-    constructor() {
-        super(...arguments);
-        this.registeredCommandIds = new Set();
-        this.settings = Object.assign({}, DEFAULT_SETTINGS);
-    }
-    onload() {
-        return __awaiter(this, void 0, void 0, function* () {
-            yield this.loadSettings();
-            this.addSettingTab(new TerminalCommandsSettingTab(this.app, this));
-            this.addRibbonIcon('terminal', 'Terminal commands', () => {
-                this.openCommandMenu();
-            });
-            this.refreshCommands();
+    registeredCommandIds = new Set();
+    settings = { ...DEFAULT_SETTINGS };
+    async onload() {
+        await this.loadSettings();
+        const settingTab = new TerminalCommandsSettingTab(this.app, this);
+        this.addSettingTab(settingTab);
+        this.register(() => settingTab.dispose());
+        this.addRibbonIcon('terminal', 'Terminal commands', () => {
+            this.openCommandMenu();
         });
+        this.refreshCommands();
     }
     openCommandMenu() {
         const menu = new TerminalCommandMenu(this.app, buildLaunchTargets(this.settings), (target) => {
-            this.runLaunchCommand(() => this.composeLaunchCommand(target.toolCommand, target.workingDirectory), target.commandName);
+            this.runLaunchCommand(() => this.composeLaunchCommand(target.toolCommand, target.workingDirectory, target.keepTerminalOpen, target.terminalId), target.commandName);
         });
         menu.open();
     }
@@ -828,41 +1259,46 @@ class TerminalCommandsPlugin extends obsidian.Plugin {
                 id: target.id,
                 name: target.commandName,
                 callback: () => {
-                    this.runLaunchCommand(() => this.composeLaunchCommand(target.toolCommand, target.workingDirectory), target.commandName);
+                    this.runLaunchCommand(() => this.composeLaunchCommand(target.toolCommand, target.workingDirectory, target.keepTerminalOpen, target.terminalId), target.commandName);
                 }
             });
             this.registeredCommandIds.add(`${this.manifest.id}:${target.id}`);
         }
     }
-    composeLaunchCommand(toolCommand, workingDirectory = 'vault') {
+    composeLaunchCommand(toolCommand, workingDirectory = 'vault', keepTerminalOpen = true, terminalId = this.settings.terminals[0]?.id ?? '') {
         const adapter = this.app.vault.adapter;
         if (!(adapter instanceof obsidian.FileSystemAdapter)) {
             return null;
         }
         const vaultPath = adapter.getBasePath();
         const launchPath = this.getLaunchPath(vaultPath, workingDirectory);
-        const terminalApp = getCurrentTerminalApp(this.settings.terminalApp);
+        const terminal = resolveTerminalProfile(this.settings, terminalId);
+        const terminalApp = terminal
+            ? getCurrentTerminalApp(terminal.applications)
+            : '';
         const launchCommand = buildLaunchCommand(terminalApp, launchPath, toolCommand, {
-            reuseExistingMacApp: this.settings.reuseExistingMacApp
+            reuseExistingMacApp: this.settings.reuseExistingMacApp,
+            keepTerminalOpen
         });
         logger.log('Compose launch command', {
             platform: getPlatformSummary(),
             terminalApp,
+            terminalId: terminal?.id,
             toolCommand,
+            keepTerminalOpen,
             vaultPath,
             launchPath,
             launchCommand
         });
-        return launchCommand ? Object.assign(Object.assign({}, launchCommand), { cwd: launchPath }) : null;
+        return launchCommand ? { ...launchCommand, cwd: launchPath } : null;
     }
     getLaunchPath(vaultPath, workingDirectory) {
-        var _a;
         if (workingDirectory === 'vault') {
             return vaultPath;
         }
         const activeFile = this.app.workspace.getActiveFile();
-        const folderPath = (_a = activeFile === null || activeFile === void 0 ? void 0 : activeFile.parent) === null || _a === void 0 ? void 0 : _a.path;
-        return folderPath ? path.join(vaultPath, folderPath) : vaultPath;
+        const folderPath = activeFile?.parent?.path;
+        return folderPath ? node_path.join(vaultPath, folderPath) : vaultPath;
     }
     runLaunchCommand(buildCommand, label) {
         const launchCommand = buildCommand();
@@ -873,42 +1309,42 @@ class TerminalCommandsPlugin extends obsidian.Plugin {
         this.executeShellCommand(launchCommand, label);
     }
     executeShellCommand(launchCommand, label) {
-        var _a;
         const adapter = this.app.vault.adapter;
         if (!(adapter instanceof obsidian.FileSystemAdapter)) {
             new obsidian.Notice('File system adapter not available. This plugin works only on desktop.');
             return;
         }
         const vaultPath = adapter.getBasePath();
-        const workingDirectory = (_a = launchCommand.cwd) !== null && _a !== void 0 ? _a : vaultPath;
+        const workingDirectory = launchCommand.cwd ?? vaultPath;
         try {
             logger.log('Spawning command', {
                 label,
-                command: launchCommand.command,
+                executable: launchCommand.executable,
+                args: launchCommand.args,
                 vaultPath,
                 workingDirectory
             });
-            const child = child_process.spawn(launchCommand.command, {
+            const child = node_child_process.spawn(launchCommand.executable, launchCommand.args, {
                 cwd: workingDirectory,
-                shell: true,
+                shell: launchCommand.shell ?? false,
                 detached: true,
                 stdio: 'ignore'
             });
             child.on('error', (error) => {
-                console.error(`[terminal-commands] Failed to run '${launchCommand.command}':`, error);
+                console.error(`[terminal-commands] Failed to run '${launchCommand.executable}':`, error);
                 new obsidian.Notice(`Failed to run ${label}. Check the developer console for details.`);
             });
             child.unref();
             logger.log('Spawned command successfully', { label });
         }
         catch (error) {
-            console.error(`[terminal-commands] Unexpected error for '${launchCommand.command}':`, error);
+            console.error(`[terminal-commands] Unexpected error for '${launchCommand.executable}':`, error);
             new obsidian.Notice(`Failed to run ${label}. Check the developer console for details.`);
         }
         finally {
             if (launchCommand.cleanup) {
                 const cleanup = launchCommand.cleanup;
-                setTimeout(() => {
+                window.setTimeout(() => {
                     try {
                         cleanup();
                     }
@@ -919,16 +1355,12 @@ class TerminalCommandsPlugin extends obsidian.Plugin {
             }
         }
     }
-    loadSettings() {
-        return __awaiter(this, void 0, void 0, function* () {
-            this.settings = normalizeSettings(yield this.loadData());
-        });
+    async loadSettings() {
+        this.settings = normalizeSettings(await this.loadData());
     }
-    saveSettings() {
-        return __awaiter(this, void 0, void 0, function* () {
-            yield this.saveData(this.settings);
-            this.refreshCommands();
-        });
+    async saveSettings() {
+        await this.saveData(this.settings);
+        this.refreshCommands();
     }
 }
 

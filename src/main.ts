@@ -1,5 +1,5 @@
-import { spawn } from 'child_process';
-import { join } from 'path';
+import { spawn } from 'node:child_process';
+import { join } from 'node:path';
 
 import { FileSystemAdapter, Notice, Plugin } from 'obsidian';
 
@@ -11,6 +11,7 @@ import {
   DEFAULT_SETTINGS,
   getCurrentTerminalApp,
   normalizeSettings,
+  resolveTerminalProfile,
   type TerminalCommandsSettings,
   type WorkingDirectoryMode
 } from './settings';
@@ -25,7 +26,9 @@ export default class TerminalCommandsPlugin extends Plugin {
 
   async onload() {
     await this.loadSettings();
-    this.addSettingTab(new TerminalCommandsSettingTab(this.app, this));
+    const settingTab = new TerminalCommandsSettingTab(this.app, this);
+    this.addSettingTab(settingTab);
+    this.register(() => settingTab.dispose());
     this.addRibbonIcon('terminal', 'Terminal commands', () => {
       this.openCommandMenu();
     });
@@ -35,7 +38,13 @@ export default class TerminalCommandsPlugin extends Plugin {
   private openCommandMenu(): void {
     const menu = new TerminalCommandMenu(this.app, buildLaunchTargets(this.settings), (target) => {
       this.runLaunchCommand(
-        () => this.composeLaunchCommand(target.toolCommand, target.workingDirectory),
+        () =>
+          this.composeLaunchCommand(
+            target.toolCommand,
+            target.workingDirectory,
+            target.keepTerminalOpen,
+            target.terminalId
+          ),
         target.commandName
       );
     });
@@ -60,7 +69,13 @@ export default class TerminalCommandsPlugin extends Plugin {
         name: target.commandName,
         callback: () => {
           this.runLaunchCommand(
-            () => this.composeLaunchCommand(target.toolCommand, target.workingDirectory),
+            () =>
+              this.composeLaunchCommand(
+                target.toolCommand,
+                target.workingDirectory,
+                target.keepTerminalOpen,
+                target.terminalId
+              ),
             target.commandName
           );
         }
@@ -71,7 +86,9 @@ export default class TerminalCommandsPlugin extends Plugin {
 
   private composeLaunchCommand(
     toolCommand?: string,
-    workingDirectory: WorkingDirectoryMode = 'vault'
+    workingDirectory: WorkingDirectoryMode = 'vault',
+    keepTerminalOpen = true,
+    terminalId = this.settings.terminals[0]?.id ?? ''
   ): LaunchCommand | null {
     const adapter = this.app.vault.adapter;
     if (!(adapter instanceof FileSystemAdapter)) {
@@ -79,14 +96,20 @@ export default class TerminalCommandsPlugin extends Plugin {
     }
     const vaultPath = adapter.getBasePath();
     const launchPath = this.getLaunchPath(vaultPath, workingDirectory);
-    const terminalApp = getCurrentTerminalApp(this.settings.terminalApp);
+    const terminal = resolveTerminalProfile(this.settings, terminalId);
+    const terminalApp = terminal
+      ? getCurrentTerminalApp(terminal.applications)
+      : '';
     const launchCommand = buildLaunchCommand(terminalApp, launchPath, toolCommand, {
-      reuseExistingMacApp: this.settings.reuseExistingMacApp
+      reuseExistingMacApp: this.settings.reuseExistingMacApp,
+      keepTerminalOpen
     });
     logger.log('Compose launch command', {
       platform: getPlatformSummary(),
       terminalApp,
+      terminalId: terminal?.id,
       toolCommand,
+      keepTerminalOpen,
       vaultPath,
       launchPath,
       launchCommand
@@ -128,29 +151,30 @@ export default class TerminalCommandsPlugin extends Plugin {
     try {
       logger.log('Spawning command', {
         label,
-        command: launchCommand.command,
+        executable: launchCommand.executable,
+        args: launchCommand.args,
         vaultPath,
         workingDirectory
       });
-      const child = spawn(launchCommand.command, {
+      const child = spawn(launchCommand.executable, launchCommand.args, {
         cwd: workingDirectory,
-        shell: true,
+        shell: launchCommand.shell ?? false,
         detached: true,
         stdio: 'ignore'
       });
       child.on('error', (error) => {
-        console.error(`[terminal-commands] Failed to run '${launchCommand.command}':`, error);
+        console.error(`[terminal-commands] Failed to run '${launchCommand.executable}':`, error);
         new Notice(`Failed to run ${label}. Check the developer console for details.`);
       });
       child.unref();
       logger.log('Spawned command successfully', { label });
     } catch (error) {
-      console.error(`[terminal-commands] Unexpected error for '${launchCommand.command}':`, error);
+      console.error(`[terminal-commands] Unexpected error for '${launchCommand.executable}':`, error);
       new Notice(`Failed to run ${label}. Check the developer console for details.`);
     } finally {
       if (launchCommand.cleanup) {
         const cleanup = launchCommand.cleanup;
-        setTimeout(() => {
+        window.setTimeout(() => {
           try {
             cleanup();
           } catch (error) {
