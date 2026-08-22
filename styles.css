@@ -1,4 +1,4 @@
-.terminal-commands-delete-actions {
+.terminal-commands-confirm-actions {
   padding-top: var(--size-4-3);
   border-top: 0;
 }
@@ -48,11 +48,10 @@
   line-height: var(--line-height-normal);
 }
 
-.terminal-commands-column-headers {
+.terminal-commands-column-headers,
+.terminal-commands-terminal-column-headers {
   display: grid;
   box-sizing: border-box;
-  min-width: 760px;
-  grid-template-columns: var(--terminal-commands-columns);
   gap: var(--size-2-1);
   padding: var(--size-2-2) var(--setting-items-padding-x);
   border-bottom: var(--setting-items-divider-width) solid var(--background-modifier-border);
@@ -62,18 +61,14 @@
   line-height: var(--line-height-tight);
 }
 
+.terminal-commands-column-headers {
+  min-width: 760px;
+  grid-template-columns: var(--terminal-commands-columns);
+}
+
 .terminal-commands-terminal-column-headers {
-  display: grid;
-  box-sizing: border-box;
   min-width: 620px;
   grid-template-columns: var(--terminal-commands-terminal-columns);
-  gap: var(--size-2-1);
-  padding: var(--size-2-2) var(--setting-items-padding-x);
-  border-bottom: var(--setting-items-divider-width) solid var(--background-modifier-border);
-  color: var(--text-muted);
-  font-size: var(--font-ui-smaller);
-  font-weight: var(--font-medium);
-  line-height: var(--line-height-tight);
 }
 
 .terminal-commands-column-header {
@@ -176,10 +171,7 @@
   white-space: nowrap;
 }
 
-.terminal-commands-list .setting-items {
-  overflow-x: auto;
-}
-
+.terminal-commands-list .setting-items,
 .terminal-commands-terminals-list .setting-items {
   overflow-x: auto;
 }

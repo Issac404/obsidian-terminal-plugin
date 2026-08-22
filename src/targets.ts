@@ -1,4 +1,8 @@
-import type { TerminalCommandsSettings, WorkingDirectoryMode } from './settings';
+import {
+  truncateTerminalName,
+  type TerminalCommandsSettings,
+  type WorkingDirectoryMode
+} from './settings';
 
 export type LaunchTarget = {
   id: string;
@@ -28,10 +32,7 @@ export const getLaunchTargetTerminalLabel = (
   target.keepTerminalOpen ? 'Keep terminal' : 'Close terminal';
 
 export const getLaunchTargetTerminalNameLabel = (target: LaunchTarget): string => {
-  const characters = [...target.terminalName];
-  return characters.length > 8
-    ? `${characters.slice(0, 8).join('')}…`
-    : target.terminalName;
+  return truncateTerminalName(target.terminalName);
 };
 
 export const getLaunchTargetTagLabels = (

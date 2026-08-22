@@ -37,6 +37,13 @@ export interface TerminalCommandsSettings {
   commands: CommandSettings[];
 }
 
+export const truncateTerminalName = (value: string): string => {
+  const characters = [...value];
+  return characters.length > 8
+    ? `${characters.slice(0, 8).join('')}…`
+    : value;
+};
+
 type UnknownRecord = Record<string, unknown>;
 
 const CURRENT_SETTINGS_VERSION = 3;
@@ -299,7 +306,6 @@ const normalizeTerminalAppSetting = (
     if (typeof value.linux === 'string') {
       next.linux = value.linux.trim();
     }
-    const platform = getCurrentDesktopPlatform();
     if (platform && next[platform]) {
       next[platform] = normalizeExecutablePath(next[platform]);
     }

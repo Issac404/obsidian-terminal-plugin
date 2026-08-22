@@ -4,8 +4,6 @@ import { join, win32 } from 'node:path';
 
 import { Platform } from 'obsidian';
 
-import { logger } from './logger';
-
 export type LaunchCommand = {
   executable: string;
   args: string[];
@@ -51,31 +49,6 @@ const getWindowsTerminalKind = (value: string): WindowsTerminalKind | null => {
 export const isSupportedWindowsTerminalApp = (value: string): boolean =>
   getWindowsTerminalKind(value) !== null;
 
-export const getPlatformSummary = (): string => {
-  if (Platform.isDesktopApp) {
-    if (Platform.isMacOS) {
-      return 'desktop-macos';
-    }
-    if (Platform.isWin) {
-      return 'desktop-windows';
-    }
-    if (Platform.isLinux) {
-      return 'desktop-linux';
-    }
-    return 'desktop-unknown';
-  }
-  if (Platform.isMobileApp) {
-    if (Platform.isIosApp) {
-      return 'mobile-ios';
-    }
-    if (Platform.isAndroidApp) {
-      return 'mobile-android';
-    }
-    return 'mobile-unknown';
-  }
-  return 'unknown';
-};
-
 const ensureTempScript = (content: string): { path: string; cleanup: () => void } => {
   const dir = mkdtempSync(join(tmpdir(), 'terminal-commands-'));
   const filePath = join(dir, 'launch.command');
@@ -87,11 +60,9 @@ const ensureTempScript = (content: string): { path: string; cleanup: () => void 
     throw error;
   }
 
-  logger.log('Created temporary launch script', { dir, filePath });
   const cleanup = (): void => {
     try {
       rmSync(dir, { recursive: true, force: true });
-      logger.log('Cleaned temporary launch script', dir);
     } catch (error) {
       console.warn('[terminal-commands] Failed to remove temporary launch script', error);
     }
@@ -145,7 +116,6 @@ const buildWindowsLaunch = (
 
   const terminalKind = getWindowsTerminalKind(app);
   if (!terminalKind) {
-    logger.log('Rejected unsupported Windows terminal executable', { app });
     return null;
   }
   const executable = quoteWindowsExecutable(app);

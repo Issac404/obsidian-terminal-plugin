@@ -5,7 +5,7 @@ import { describe, expect, it } from 'vitest';
 const source = readFileSync(new URL('../src/settings-tab.ts', import.meta.url), 'utf8');
 
 describe('command list chrome', () => {
-  it('adds column headers after declarative rendering and cleans up when hidden', () => {
+  it('keeps declarative rendering lifecycle and required command controls', () => {
     expect(source).toContain('new ViewMutationObserver');
     expect(source).toContain('childList: true');
     expect(source).toContain('subtree: true');
@@ -23,7 +23,10 @@ describe('command list chrome', () => {
     expect(source).toContain('Open in terminal cannot be deleted.');
     expect(source).toContain("if (this.plugin.settings.terminals.length <= 1)");
     expect(source).toContain(".setButtonText('Restore defaults')");
-    expect(source).toContain('new RestoreTerminalsModal');
+    expect(source).toContain('class ConfirmModal extends Modal');
+    expect(source.match(/new ConfirmModal/g)).toHaveLength(3);
+    expect(source).not.toContain('class DeleteItemModal');
+    expect(source).not.toContain('class RestoreTerminalsModal');
     expect(source).toContain('restoreDefaultTerminalProfiles(this.plugin.settings)');
     expect(source).toContain("'--dropdown-fitted-width': TERMINAL_DROPDOWN_WIDTH");
     expect(source).toContain("text.setValue('').setDisabled(true)");
@@ -40,5 +43,7 @@ describe('command list chrome', () => {
       "text: 'Note folder: on uses the note folder; off uses the Vault folder.'"
     );
     expect(source).toContain("text: 'Keep open: on keeps the terminal open");
+    expect(source).toContain('private renderColumnHeaders(');
+    expect(source).toContain('private setTerminalDropdownTitle(');
   });
 });

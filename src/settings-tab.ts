@@ -19,6 +19,7 @@ import {
   getCurrentTerminalApp,
   restoreDefaultTerminalProfiles,
   setCurrentTerminalApp,
+  truncateTerminalName,
   type CommandSettings,
   type TerminalCommandsSettings,
   type TerminalProfile
@@ -32,71 +33,59 @@ type SettingsHost = Plugin & {
 const SAVE_DELAY_MS = 250;
 const TERMINAL_DROPDOWN_WIDTH = '112px';
 
-class DeleteItemModal extends Modal {
+type ConfirmModalOptions = {
+  title: string;
+  message: string;
+  confirmLabel: string;
+  onConfirm: () => void;
+};
+
+type ColumnHeader = readonly [label: string, centered: boolean];
+
+const TERMINAL_COLUMN_HEADERS: readonly ColumnHeader[] = [
+  ['Name', false],
+  ['Path', false],
+  ['Browse', true],
+  ['Delete', true]
+];
+
+const COMMAND_COLUMN_HEADERS: readonly ColumnHeader[] = [
+  ['Sort', true],
+  ['Name', false],
+  ['Command', false],
+  ['Terminal', false],
+  ['Note folder', true],
+  ['Keep open', true],
+  ['Delete', true]
+];
+
+class ConfirmModal extends Modal {
   constructor(
     app: App,
-    private readonly itemType: 'command' | 'terminal',
-    private readonly itemName: string,
-    private readonly confirmDelete: () => void
+    private readonly options: ConfirmModalOptions
   ) {
     super(app);
   }
 
   onOpen(): void {
-    this.setTitle(`Delete ${this.itemType}`);
+    this.setTitle(this.options.title);
     this.contentEl.createEl('p', {
-      text: `Delete "${this.itemName}"? This action cannot be undone.`
+      text: this.options.message
     });
 
     const actions = new Setting(this.contentEl);
-    actions.settingEl.addClass('terminal-commands-delete-actions');
+    actions.settingEl.addClass('terminal-commands-confirm-actions');
     actions.addButton((button) => {
       button.setButtonText('Cancel').onClick(() => this.close());
       button.buttonEl.focus();
     });
     actions.addButton((button) =>
       button
-        .setButtonText('Delete')
+        .setButtonText(this.options.confirmLabel)
         .setDestructive()
         .onClick(() => {
           this.close();
-          this.confirmDelete();
-        })
-    );
-  }
-
-  onClose(): void {
-    this.contentEl.empty();
-  }
-}
-
-class RestoreTerminalsModal extends Modal {
-  constructor(
-    app: App,
-    private readonly confirmRestore: () => void
-  ) {
-    super(app);
-  }
-
-  onOpen(): void {
-    this.setTitle('Restore default terminals');
-    this.contentEl.createEl('p', {
-      text: 'Replace the terminal list with the platform defaults? Custom terminals will be removed, and their commands will use the first default terminal.'
-    });
-
-    const actions = new Setting(this.contentEl);
-    actions.settingEl.addClass('terminal-commands-delete-actions');
-    actions.addButton((button) => {
-      button.setButtonText('Cancel').onClick(() => this.close());
-      button.buttonEl.focus();
-    });
-    actions.addButton((button) =>
-      button
-        .setButtonText('Restore')
-        .setDestructive()
-        .onClick(() => {
-          this.close();
-          this.confirmRestore();
+          this.options.onConfirm();
         })
     );
   }
@@ -264,16 +253,7 @@ export class TerminalCommandsSettingTab extends PluginSettingTab {
       });
       dropdown.setValue(command.terminalId).onChange((value) => {
         command.terminalId = value;
-        const selectedIndex = this.plugin.settings.terminals.findIndex(
-          (terminal) => terminal.id === value
-        );
-        const selectedTerminal = this.plugin.settings.terminals[selectedIndex];
-        if (selectedTerminal) {
-          dropdown.selectEl.setAttribute(
-            'title',
-            this.getTerminalLabel(selectedTerminal, selectedIndex)
-          );
-        }
+        this.setTerminalDropdownTitle(dropdown.selectEl, value);
         void this.saveImmediately();
       });
       dropdown.selectEl.setAttribute('aria-label', 'Terminal');
@@ -281,16 +261,7 @@ export class TerminalCommandsSettingTab extends PluginSettingTab {
       dropdown.selectEl.setCssProps({
         '--dropdown-fitted-width': TERMINAL_DROPDOWN_WIDTH
       });
-      const selectedIndex = this.plugin.settings.terminals.findIndex(
-        (terminal) => terminal.id === command.terminalId
-      );
-      const selectedTerminal = this.plugin.settings.terminals[selectedIndex];
-      if (selectedTerminal) {
-        dropdown.selectEl.setAttribute(
-          'title',
-          this.getTerminalLabel(selectedTerminal, selectedIndex)
-        );
-      }
+      this.setTerminalDropdownTitle(dropdown.selectEl, command.terminalId);
     });
 
     setting.addToggle((toggle) => {
@@ -436,15 +407,20 @@ export class TerminalCommandsSettingTab extends PluginSettingTab {
     }
 
     const displayName = command.name.trim() || `Command ${index + 1}`;
-    new DeleteItemModal(this.app, 'command', displayName, () => {
-      const currentIndex = this.plugin.settings.commands.findIndex(
-        (candidate) => candidate.id === command.id
-      );
-      if (currentIndex < 0) {
-        return;
+    new ConfirmModal(this.app, {
+      title: 'Delete command',
+      message: `Delete "${displayName}"? This action cannot be undone.`,
+      confirmLabel: 'Delete',
+      onConfirm: () => {
+        const currentIndex = this.plugin.settings.commands.findIndex(
+          (candidate) => candidate.id === command.id
+        );
+        if (currentIndex < 0) {
+          return;
+        }
+        this.plugin.settings.commands.splice(currentIndex, 1);
+        void this.saveImmediately().then(() => this.update());
       }
-      this.plugin.settings.commands.splice(currentIndex, 1);
-      void this.saveImmediately().then(() => this.update());
     }).open();
   }
 
@@ -455,29 +431,39 @@ export class TerminalCommandsSettingTab extends PluginSettingTab {
     }
 
     const displayName = this.getTerminalLabel(terminal, index);
-    new DeleteItemModal(this.app, 'terminal', displayName, () => {
-      const terminalIndex = this.plugin.settings.terminals.findIndex(
-        (candidate) => candidate.id === terminal.id
-      );
-      if (terminalIndex < 0) {
-        return;
-      }
-
-      this.plugin.settings.terminals.splice(terminalIndex, 1);
-      const fallbackTerminalId = this.plugin.settings.terminals[0]?.id ?? '';
-      for (const command of this.plugin.settings.commands) {
-        if (command.terminalId === terminal.id) {
-          command.terminalId = fallbackTerminalId;
+    new ConfirmModal(this.app, {
+      title: 'Delete terminal',
+      message: `Delete "${displayName}"? This action cannot be undone.`,
+      confirmLabel: 'Delete',
+      onConfirm: () => {
+        const terminalIndex = this.plugin.settings.terminals.findIndex(
+          (candidate) => candidate.id === terminal.id
+        );
+        if (terminalIndex < 0) {
+          return;
         }
+
+        this.plugin.settings.terminals.splice(terminalIndex, 1);
+        const fallbackTerminalId = this.plugin.settings.terminals[0]?.id ?? '';
+        for (const command of this.plugin.settings.commands) {
+          if (command.terminalId === terminal.id) {
+            command.terminalId = fallbackTerminalId;
+          }
+        }
+        void this.saveImmediately().then(() => this.update());
       }
-      void this.saveImmediately().then(() => this.update());
     }).open();
   }
 
   private confirmRestoreTerminals(): void {
-    new RestoreTerminalsModal(this.app, () => {
-      restoreDefaultTerminalProfiles(this.plugin.settings);
-      void this.saveImmediately().then(() => this.update());
+    new ConfirmModal(this.app, {
+      title: 'Restore default terminals',
+      message: 'Replace the terminal list with the platform defaults? Custom terminals will be removed, and their commands will use the first default terminal.',
+      confirmLabel: 'Restore',
+      onConfirm: () => {
+        restoreDefaultTerminalProfiles(this.plugin.settings);
+        void this.saveImmediately().then(() => this.update());
+      }
     }).open();
   }
 
@@ -489,11 +475,19 @@ export class TerminalCommandsSettingTab extends PluginSettingTab {
     terminal: TerminalProfile,
     index: number
   ): string {
-    const label = this.getTerminalLabel(terminal, index);
-    const characters = [...label];
-    return characters.length > 8
-      ? `${characters.slice(0, 8).join('')}…`
-      : label;
+    return truncateTerminalName(this.getTerminalLabel(terminal, index));
+  }
+
+  private setTerminalDropdownTitle(selectEl: HTMLSelectElement, terminalId: string): void {
+    const terminalIndex = this.plugin.settings.terminals.findIndex(
+      (terminal) => terminal.id === terminalId
+    );
+    const terminal = this.plugin.settings.terminals[terminalIndex];
+    if (terminal) {
+      selectEl.setAttribute('title', this.getTerminalLabel(terminal, terminalIndex));
+    } else {
+      selectEl.removeAttribute('title');
+    }
   }
 
   private observeCommandList(): void {
@@ -545,29 +539,11 @@ export class TerminalCommandsSettingTab extends PluginSettingTab {
       });
       terminalHeadingEl.after(terminalDescriptionEl);
     }
-    const terminalListEl = terminalGroupEl?.querySelector<HTMLElement>('.setting-items');
-    if (
-      terminalListEl &&
-      !terminalListEl.querySelector('.terminal-commands-terminal-column-headers')
-    ) {
-      const terminalHeadersEl = terminalListEl.createDiv({
-        cls: 'terminal-commands-terminal-column-headers',
-        attr: { role: 'row' }
-      });
-      for (const [label, centered] of [
-        ['Name', false],
-        ['Path', false],
-        ['Browse', true],
-        ['Delete', true]
-      ] as const) {
-        terminalHeadersEl.createDiv({
-          cls: `terminal-commands-column-header${centered ? ' is-centered' : ''}`,
-          text: label,
-          attr: { role: 'columnheader' }
-        });
-      }
-      terminalListEl.prepend(terminalHeadersEl);
-    }
+    this.renderColumnHeaders(
+      terminalGroupEl?.querySelector<HTMLElement>('.setting-items'),
+      'terminal-commands-terminal-column-headers',
+      TERMINAL_COLUMN_HEADERS
+    );
 
     const groupEl = this.containerEl.querySelector<HTMLElement>('.terminal-commands-list');
     if (!groupEl) {
@@ -588,24 +564,27 @@ export class TerminalCommandsSettingTab extends PluginSettingTab {
       headingEl.after(descriptionEl);
     }
 
-    const listEl = groupEl.querySelector<HTMLElement>('.setting-items');
-    if (!listEl || listEl.querySelector('.terminal-commands-column-headers')) {
+    this.renderColumnHeaders(
+      groupEl.querySelector<HTMLElement>('.setting-items'),
+      'terminal-commands-column-headers',
+      COMMAND_COLUMN_HEADERS
+    );
+  }
+
+  private renderColumnHeaders(
+    listEl: HTMLElement | null | undefined,
+    className: string,
+    columns: readonly ColumnHeader[]
+  ): void {
+    if (!listEl || listEl.querySelector(`.${className}`)) {
       return;
     }
 
     const headersEl = listEl.createDiv({
-      cls: 'terminal-commands-column-headers',
+      cls: className,
       attr: { role: 'row' }
     });
-    for (const [label, centered] of [
-      ['Sort', true],
-      ['Name', false],
-      ['Command', false],
-      ['Terminal', false],
-      ['Note folder', true],
-      ['Keep open', true],
-      ['Delete', true]
-    ] as const) {
+    for (const [label, centered] of columns) {
       headersEl.createDiv({
         cls: `terminal-commands-column-header${centered ? ' is-centered' : ''}`,
         text: label,
