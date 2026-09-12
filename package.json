@@ -1,6 +1,6 @@
 {
   "name": "obsidian-terminal-commands",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "Open an Obsidian vault in a terminal and launch configurable shell commands.",
   "author": "Issac404",
   "scripts": {

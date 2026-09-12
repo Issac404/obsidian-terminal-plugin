@@ -9,13 +9,18 @@ const mocks = vi.hoisted(() => ({
     removeCommand: vi.fn()
   },
   buildLaunchCommand: vi.fn<() => LaunchCommand | null>(() => null),
-  spawn: vi.fn(() => ({ on: vi.fn(), unref: vi.fn() }))
+  spawn: vi.fn(() => ({ on: vi.fn(), unref: vi.fn() })),
+  addIcon: vi.fn(),
+  removeIcon: vi.fn(),
+  openMenu: vi.fn()
 }));
 
 vi.mock('node:child_process', () => ({ spawn: mocks.spawn }));
 
 vi.mock('obsidian', async (importOriginal) => ({
   ...await importOriginal<typeof import('./obsidian-stub')>(),
+  addIcon: mocks.addIcon,
+  removeIcon: mocks.removeIcon,
   Plugin: class {
     constructor(public app: App, public manifest: PluginManifest) {}
     loadData = vi.fn(async () => null);
@@ -34,7 +39,9 @@ vi.mock('obsidian', async (importOriginal) => ({
 vi.mock('../src/command-manager', () => ({
   resolveCommandManager: () => mocks.commandManager
 }));
-vi.mock('../src/command-menu', () => ({ TerminalCommandMenu: class {} }));
+vi.mock('../src/command-menu', () => ({
+  TerminalCommandMenu: class { open = mocks.openMenu; }
+}));
 vi.mock('../src/settings-tab', () => ({
   TerminalCommandsSettingTab: class { dispose = vi.fn(); }
 }));
@@ -42,13 +49,15 @@ vi.mock('../src/launcher', () => ({ buildLaunchCommand: mocks.buildLaunchCommand
 
 import { FileSystemAdapter } from 'obsidian';
 
+import { TERMINAL_EXTERNAL_ICON_ID, TERMINAL_EXTERNAL_ICON_SVG } from '../src/icons';
 import TerminalCommandsPlugin from '../src/main';
 import { normalizeSettings, restoreDefaultCommands, type TerminalCommandsSettings } from '../src/settings';
 
-type TestPlugin = Omit<TerminalCommandsPlugin, 'saveData' | 'addCommand' | 'addSettingTab' | 'register'> & {
+type TestPlugin = Omit<TerminalCommandsPlugin, 'saveData' | 'addCommand' | 'addSettingTab' | 'addRibbonIcon' | 'register'> & {
   saveData: Mock<(settings: TerminalCommandsSettings) => Promise<void>>;
   addCommand: Mock<(command: Command) => Command>;
   addSettingTab: Mock<(tab: PluginSettingTab) => void>;
+  addRibbonIcon: Mock<(icon: string, title: string, callback: (event: MouseEvent) => void) => HTMLElement>;
   register: Mock<(dispose: () => void) => void>;
 };
 
@@ -76,6 +85,38 @@ const createPlugin = () => {
 beforeEach(() => {
   vi.clearAllMocks();
   mocks.buildLaunchCommand.mockReturnValue(null);
+});
+
+describe('external terminal ribbon icon', () => {
+  it('registers the themed external-window icon before adding the ribbon entry', async () => {
+    const plugin = createPlugin();
+    await plugin.onload();
+
+    expect(mocks.addIcon).toHaveBeenCalledExactlyOnceWith(TERMINAL_EXTERNAL_ICON_ID, TERMINAL_EXTERNAL_ICON_SVG);
+    expect(plugin.addRibbonIcon).toHaveBeenCalledExactlyOnceWith(
+      TERMINAL_EXTERNAL_ICON_ID, 'Terminal commands', expect.any(Function)
+    );
+    expect(mocks.addIcon.mock.invocationCallOrder[0]).toBeLessThan(plugin.addRibbonIcon.mock.invocationCallOrder[0]);
+    expect(TERMINAL_EXTERNAL_ICON_SVG).toContain('stroke="currentColor"');
+    expect(TERMINAL_EXTERNAL_ICON_SVG).toContain('fill="none"');
+    expect(TERMINAL_EXTERNAL_ICON_SVG).toContain('d="m14 10 7-7m-6 0h6v6"');
+  });
+
+  it('still opens the command menu when the ribbon icon is clicked', async () => {
+    const plugin = createPlugin();
+    await plugin.onload();
+    plugin.addRibbonIcon.mock.calls[0][2]({} as MouseEvent);
+    expect(mocks.openMenu).toHaveBeenCalledOnce();
+  });
+
+  it('removes only its own custom icon when the plugin is unloaded', async () => {
+    const plugin = createPlugin();
+    await plugin.onload();
+    expect(mocks.removeIcon).not.toHaveBeenCalled();
+    plugin.onunload();
+    for (const [dispose] of plugin.register.mock.calls) dispose();
+    expect(mocks.removeIcon).toHaveBeenCalledExactlyOnceWith(TERMINAL_EXTERNAL_ICON_ID);
+  });
 });
 
 describe('command registration', () => {

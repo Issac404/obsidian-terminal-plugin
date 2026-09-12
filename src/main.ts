@@ -1,10 +1,11 @@
 import { spawn } from 'node:child_process';
 import { join } from 'node:path';
 
-import { FileSystemAdapter, Notice, Plugin } from 'obsidian';
+import { addIcon, FileSystemAdapter, Notice, Plugin, removeIcon } from 'obsidian';
 
 import { TerminalCommandMenu } from './command-menu';
 import { resolveCommandManager } from './command-manager';
+import { TERMINAL_EXTERNAL_ICON_ID, TERMINAL_EXTERNAL_ICON_SVG } from './icons';
 import { buildLaunchCommand, type LaunchCommand } from './launcher';
 import {
   DEFAULT_SETTINGS,
@@ -27,10 +28,12 @@ export default class TerminalCommandsPlugin extends Plugin {
 
   async onload() {
     await this.loadSettings();
+    addIcon(TERMINAL_EXTERNAL_ICON_ID, TERMINAL_EXTERNAL_ICON_SVG);
+    this.register(() => removeIcon(TERMINAL_EXTERNAL_ICON_ID));
     const settingTab = new TerminalCommandsSettingTab(this.app, this);
     this.addSettingTab(settingTab);
     this.register(() => settingTab.dispose());
-    this.addRibbonIcon('terminal', 'Terminal commands', () => {
+    this.addRibbonIcon(TERMINAL_EXTERNAL_ICON_ID, 'Terminal commands', () => {
       this.openCommandMenu();
     });
     this.refreshCommands();
