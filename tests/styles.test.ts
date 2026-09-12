@@ -24,6 +24,8 @@ describe('command settings layout', () => {
     expect(styles).toContain('min-width: 112px;');
     expect(styles).toContain('max-width: 112px;');
     expect(styles).toContain('field-sizing: fixed;');
-    expect(styles).toContain('.terminal-commands-restore-terminals');
+    expect(styles).toContain(
+      '.terminal-commands-restore-defaults {\n  margin-right: var(--size-2-2);\n}'
+    );
   });
 });

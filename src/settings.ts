@@ -270,13 +270,13 @@ export const createDefaultTerminalProfiles = (): TerminalProfile[] =>
     ? [buildDefaultTerminalProfile(), buildDefaultWindowsPowerShellProfile()]
     : [buildDefaultTerminalProfile()];
 
-const cloneDefaultCommands = (): CommandSettings[] => {
+const cloneDefaultCommands = (terminalId = INITIAL_TERMINAL_ID): CommandSettings[] => {
   const commands = Platform.isWin
     ? [...DEFAULT_COMMANDS, ...WINDOWS_DEFAULT_COMMANDS]
     : DEFAULT_COMMANDS;
   return commands.map((command) => ({
     ...command,
-    terminalId: INITIAL_TERMINAL_ID
+    terminalId
   }));
 };
 
@@ -387,10 +387,7 @@ const normalizeCommands = (
   fallbackTerminalId: string
 ): CommandSettings[] => {
   if (!Array.isArray(value)) {
-    return cloneDefaultCommands().map((command) => ({
-      ...command,
-      terminalId: fallbackTerminalId
-    }));
+    return cloneDefaultCommands(fallbackTerminalId);
   }
 
   const usedIds = new Set<string>();
@@ -532,6 +529,10 @@ export const normalizeSettings = (stored: unknown): TerminalCommandsSettings => 
     ),
     commands
   };
+};
+
+export const restoreDefaultCommands = (settings: TerminalCommandsSettings): void => {
+  settings.commands = cloneDefaultCommands(settings.terminals[0].id);
 };
 
 export const restoreDefaultTerminalProfiles = (

@@ -17,6 +17,7 @@ import {
   createCommand,
   createTerminalProfile,
   getCurrentTerminalApp,
+  restoreDefaultCommands,
   restoreDefaultTerminalProfiles,
   setCurrentTerminalApp,
   truncateTerminalName,
@@ -467,6 +468,18 @@ export class TerminalCommandsSettingTab extends PluginSettingTab {
     }).open();
   }
 
+  private confirmRestoreCommands(): void {
+    new ConfirmModal(this.app, {
+      title: 'Restore default commands',
+      message: 'Replace the command list with the platform defaults? Custom commands and edits will be removed. Restored commands will use the first current terminal; the terminal list will not change. This action cannot be undone.',
+      confirmLabel: 'Restore',
+      onConfirm: () => {
+        restoreDefaultCommands(this.plugin.settings);
+        void this.saveImmediately().then(() => this.update());
+      }
+    }).open();
+  }
+
   private getTerminalLabel(terminal: TerminalProfile, index: number): string {
     return terminal.name.trim() || `Terminal ${index + 1}`;
   }
@@ -514,20 +527,12 @@ export class TerminalCommandsSettingTab extends PluginSettingTab {
     const terminalHeadingEl = terminalGroupEl?.querySelector<HTMLElement>(
       '.setting-item-heading'
     );
-    const terminalHeadingControlsEl = terminalHeadingEl?.querySelector<HTMLElement>(
-      '.setting-item-control'
+    this.renderRestoreButton(
+      terminalHeadingEl,
+      'terminal-commands-restore-terminals',
+      'Restore the platform default terminal list',
+      () => this.confirmRestoreTerminals()
     );
-    if (
-      terminalHeadingControlsEl &&
-      !terminalHeadingControlsEl.querySelector('.terminal-commands-restore-terminals')
-    ) {
-      const restoreButton = new ButtonComponent(terminalHeadingControlsEl)
-        .setButtonText('Restore defaults')
-        .setTooltip('Restore the platform default terminal list')
-        .setClass('terminal-commands-restore-terminals')
-        .onClick(() => this.confirmRestoreTerminals());
-      terminalHeadingControlsEl.prepend(restoreButton.buttonEl);
-    }
     if (
       terminalGroupEl &&
       terminalHeadingEl &&
@@ -551,6 +556,12 @@ export class TerminalCommandsSettingTab extends PluginSettingTab {
     }
 
     const headingEl = groupEl.querySelector<HTMLElement>('.setting-item-heading');
+    this.renderRestoreButton(
+      headingEl,
+      'terminal-commands-restore-commands',
+      'Restore the platform default command list',
+      () => this.confirmRestoreCommands()
+    );
     if (headingEl && !groupEl.querySelector('.terminal-commands-group-description')) {
       const descriptionEl = groupEl.createDiv({
         cls: 'terminal-commands-group-description'
@@ -569,6 +580,25 @@ export class TerminalCommandsSettingTab extends PluginSettingTab {
       'terminal-commands-column-headers',
       COMMAND_COLUMN_HEADERS
     );
+  }
+
+  private renderRestoreButton(
+    headingEl: HTMLElement | null | undefined,
+    className: string,
+    tooltip: string,
+    onRestore: () => void
+  ): void {
+    const controlsEl = headingEl?.querySelector<HTMLElement>('.setting-item-control');
+    if (!controlsEl || controlsEl.querySelector(`.${className}`)) {
+      return;
+    }
+    const button = new ButtonComponent(controlsEl)
+      .setButtonText('Restore defaults')
+      .setTooltip(tooltip)
+      .setClass(className)
+      .onClick(onRestore);
+    button.buttonEl.addClass('terminal-commands-restore-defaults');
+    controlsEl.prepend(button.buttonEl);
   }
 
   private renderColumnHeaders(

@@ -15,12 +15,14 @@ import {
   type WorkingDirectoryMode
 } from './settings';
 import { TerminalCommandsSettingTab } from './settings-tab';
-import { buildLaunchTargets, type LaunchTarget } from './targets';
+import { buildLaunchTargets } from './targets';
 
 const TEMP_SCRIPT_CLEANUP_DELAY_MS = 30_000;
 
 export default class TerminalCommandsPlugin extends Plugin {
-  private registeredCommandIds = new Set<string>();
+  private registeredCommandNames = new Map<string, string>();
+  private saveQueue: Promise<void> = Promise.resolve();
+  private isUnloading = false;
   settings: TerminalCommandsSettings = { ...DEFAULT_SETTINGS };
 
   async onload() {
@@ -36,36 +38,54 @@ export default class TerminalCommandsPlugin extends Plugin {
 
   private openCommandMenu(): void {
     const menu = new TerminalCommandMenu(this.app, buildLaunchTargets(this.settings), (target) => {
-      this.launchTarget(target);
+      this.launchTarget(target.id);
     });
     menu.open();
   }
 
-  refreshCommands() {
+  onunload(): void {
+    this.isUnloading = true;
+  }
+
+  refreshCommands(): void {
+    if (this.isUnloading) {
+      return;
+    }
+    const targets = buildLaunchTargets(this.settings);
+    const nextNames = new Map(targets.map((target) => [target.id, target.commandName]));
     const commandManager = resolveCommandManager(this.app);
 
-    if (commandManager) {
-      for (const fullId of this.registeredCommandIds) {
-        if (commandManager.findCommand(fullId)) {
-          commandManager.removeCommand(fullId);
-        }
+    for (const [id, name] of this.registeredCommandNames) {
+      if (nextNames.get(id) === name) {
+        continue;
       }
+      const fullId = `${this.manifest.id}:${id}`;
+      if (commandManager?.findCommand(fullId)) {
+        commandManager.removeCommand(fullId);
+      }
+      this.registeredCommandNames.delete(id);
     }
-    this.registeredCommandIds.clear();
 
-    for (const target of buildLaunchTargets(this.settings)) {
+    for (const target of targets) {
+      const id = target.id;
+      if (this.registeredCommandNames.has(id)) {
+        continue;
+      }
       this.addCommand({
-        id: target.id,
+        id,
         name: target.commandName,
-        callback: () => {
-          this.launchTarget(target);
-        }
+        callback: () => this.launchTarget(id)
       });
-      this.registeredCommandIds.add(`${this.manifest.id}:${target.id}`);
+      this.registeredCommandNames.set(id, target.commandName);
     }
   }
 
-  private launchTarget(target: LaunchTarget): void {
+  private launchTarget(id: string): void {
+    // Settings can change while a menu entry or a debounced save is pending.
+    const target = buildLaunchTargets(this.settings).find((item) => item.id === id);
+    if (!target) {
+      return;
+    }
     this.runLaunchCommand(
       () =>
         this.composeLaunchCommand(
@@ -127,6 +147,8 @@ export default class TerminalCommandsPlugin extends Plugin {
       const child = spawn(launchCommand.executable, launchCommand.args, {
         cwd: launchCommand.cwd,
         shell: launchCommand.shell ?? false,
+        env: { ...process.env, ...launchCommand.env },
+        windowsVerbatimArguments: launchCommand.windowsVerbatimArguments,
         detached: true,
         stdio: 'ignore'
       });
@@ -159,8 +181,12 @@ export default class TerminalCommandsPlugin extends Plugin {
     this.settings = normalizeSettings(await this.loadData());
   }
 
-  async saveSettings() {
-    await this.saveData(this.settings);
+  async saveSettings(): Promise<void> {
     this.refreshCommands();
+    const snapshot = structuredClone(this.settings);
+    const write = () => this.saveData(snapshot);
+    // Each caller receives its write failure; later saves may still proceed.
+    this.saveQueue = this.saveQueue.then(write, write);
+    return this.saveQueue;
   }
 }

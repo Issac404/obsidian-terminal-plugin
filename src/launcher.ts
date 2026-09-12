@@ -9,6 +9,8 @@ export type LaunchCommand = {
   args: string[];
   cwd: string;
   shell?: boolean;
+  env?: NodeJS.ProcessEnv;
+  windowsVerbatimArguments?: boolean;
   cleanup?: () => void;
 };
 
@@ -26,9 +28,6 @@ const quotePosix = (value: string): string => `'${value.replace(/'/g, `'"'"'`)}'
 const quoteCmdPath = (value: string): string => `"${value.replace(/"/g, '""')}"`;
 
 const quotePowerShellPath = (value: string): string => `'${value.replace(/'/g, "''")}'`;
-
-const quoteWindowsExecutable = (value: string): string =>
-  /[\s&(){}^=;!'+,`~]/.test(value) ? quoteCmdPath(value) : value;
 
 type WindowsTerminalKind = 'cmd' | 'powershell' | 'pwsh';
 
@@ -118,34 +117,34 @@ const buildWindowsLaunch = (
   if (!terminalKind) {
     return null;
   }
-  const executable = quoteWindowsExecutable(app);
-  const cmdBody = `cd /d ${quoteCmdPath(vaultPath)}${toolCommand ? ` && ${toolCommand}` : ''}`;
-  const cmdMode = options?.keepTerminalOpen === false ? '/C' : '/K';
-
+  let terminalArguments: string;
   if (terminalKind === 'cmd') {
-    return {
-      executable: `start "" ${executable} ${cmdMode} "${cmdBody}"`,
-      args: [],
-      cwd: vaultPath,
-      shell: true
-    };
-  }
-
-  if (terminalKind === 'powershell' || terminalKind === 'pwsh') {
+    const cmdMode = options?.keepTerminalOpen === false ? '/C' : '/K';
+    // The new terminal inherits cwd; embedding a cd command would expand % in paths.
+    terminalArguments = `/S ${cmdMode}${toolCommand ? ` "${toolCommand}"` : ''}`;
+  } else {
     const powerShellBody = `Set-Location -LiteralPath ${quotePowerShellPath(vaultPath)}${
       toolCommand ? `; ${toolCommand}` : ''
     }`;
-    return {
-      executable: `start "" ${executable}${
-        options?.keepTerminalOpen === false ? '' : ' -NoExit'
-      } -Command "${powerShellBody}"`,
-      args: [],
-      cwd: vaultPath,
-      shell: true
-    };
+    const encodedCommand = Buffer.from(powerShellBody, 'utf16le').toString('base64');
+    terminalArguments = `${options?.keepTerminalOpen === false ? '' : '-NoExit '}-EncodedCommand ${encodedCommand}`;
   }
 
-  return null;
+  // Late expansion carries paths, quotes and metacharacters past the outer CMD parser.
+  // Verbatim arguments keep Node from adding C-runtime escaping to this CMD command line.
+  return {
+    executable: 'cmd.exe',
+    args: [
+      '/D', '/V:ON', '/S', '/C',
+      '"start "" !TERMINAL_COMMANDS_APP! !TERMINAL_COMMANDS_ARGS!"'
+    ],
+    cwd: vaultPath,
+    windowsVerbatimArguments: true,
+    env: {
+      TERMINAL_COMMANDS_APP: quoteCmdPath(app),
+      TERMINAL_COMMANDS_ARGS: terminalArguments
+    }
+  };
 };
 
 const buildUnixLaunch = (

@@ -7,6 +7,7 @@ import {
   getCurrentTerminalApp,
   normalizeSettings,
   resolveTerminalProfile,
+  restoreDefaultCommands,
   restoreDefaultTerminalProfiles,
   setCurrentTerminalApp
 } from '../src/settings';
@@ -19,6 +20,62 @@ beforeEach(() => {
     isMacOS: false,
     isWin: true,
     isLinux: false
+  });
+});
+
+describe('restoring default commands', () => {
+  it('replaces custom commands and edits while retaining terminals and other settings', () => {
+    const settings = normalizeSettings({});
+    settings.terminals = [
+      { id: 'custom-first', name: 'My terminal', applications: { win: 'pwsh.exe' } },
+      { id: 'custom-second', name: 'Other terminal', applications: { win: 'cmd.exe' } }
+    ];
+    settings.reuseExistingMacApp = false;
+    const terminals = settings.terminals;
+    const expected = settings.commands.map((command) => ({ ...command, terminalId: 'custom-first' }));
+    const version = settings.settingsVersion;
+    Object.assign(settings.commands[0], { name: 'Renamed terminal', workingDirectory: 'current-note' });
+    Object.assign(settings.commands[1], { name: 'Renamed command', command: 'echo changed', keepTerminalOpen: false });
+    settings.commands.reverse();
+    settings.commands.pop();
+    settings.commands.push({ ...settings.commands[0], id: 'custom-command', name: 'Custom' });
+
+    restoreDefaultCommands(settings);
+
+    expect(settings.commands).toEqual(expected);
+    expect(settings.commands.map(({ id }) => id)).toEqual([
+      'open-terminal', 'claude', 'codex', 'antigravity', 'opencode', 'git-pull', 'vscode', 'file-explorer'
+    ]);
+    expect(settings.terminals).toBe(terminals);
+    expect(settings.reuseExistingMacApp).toBe(false);
+    expect(settings.settingsVersion).toBe(version);
+  });
+
+  it.each(['macos', 'linux'])('restores the current %s command defaults without Windows entries', (platform) => {
+    const settings = normalizeSettings({});
+    Object.assign(Platform, { isWin: false, isMacOS: platform === 'macos', isLinux: platform === 'linux' });
+
+    restoreDefaultCommands(settings);
+
+    expect(settings.commands.some(({ id }) => id === 'file-explorer')).toBe(false);
+    expect(settings.commands.at(-1)?.id).toBe('vscode');
+    expect(settings.commands.filter(({ kind }) => kind === 'open-terminal')).toHaveLength(1);
+  });
+
+  it('restores an empty list and creates fresh defaults on every reset', () => {
+    const settings = normalizeSettings({ settingsVersion: 3, commands: [] });
+    restoreDefaultCommands(settings);
+    const expected = structuredClone(settings.commands);
+    const firstCommands = settings.commands;
+    settings.commands[0].name = 'Edited after reset';
+    settings.commands[1].command = 'echo changed';
+
+    restoreDefaultCommands(settings);
+
+    expect(settings.commands).toEqual(expected);
+    expect(settings.commands).not.toBe(firstCommands);
+    expect(settings.commands[0]).not.toBe(firstCommands[0]);
+    expect(normalizeSettings({}).commands).toEqual(expected);
   });
 });
 

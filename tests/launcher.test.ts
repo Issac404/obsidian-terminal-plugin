@@ -20,6 +20,10 @@ const requireLaunchCommand = (command: LaunchCommand | null): LaunchCommand => {
   return command;
 };
 
+const decodePowerShellCommand = (command: LaunchCommand): string =>
+  Buffer.from(command.env!.TERMINAL_COMMANDS_ARGS!.split('-EncodedCommand ')[1], 'base64')
+    .toString('utf16le');
+
 afterEach(() => {
   for (const cleanup of cleanups.splice(0)) {
     cleanup();
@@ -42,11 +46,17 @@ describe('buildLaunchCommandForPlatform', () => {
     );
 
     expect(command).toEqual({
-      executable:
-        'start "" cmd.exe /K "cd /d "C:\\Notes & drafts" && git status"',
-      args: [],
+      executable: 'cmd.exe',
+      args: [
+        '/D', '/V:ON', '/S', '/C',
+        '"start "" !TERMINAL_COMMANDS_APP! !TERMINAL_COMMANDS_ARGS!"'
+      ],
       cwd: 'C:\\Notes & drafts',
-      shell: true
+      windowsVerbatimArguments: true,
+      env: {
+        TERMINAL_COMMANDS_APP: '"cmd.exe"',
+        TERMINAL_COMMANDS_ARGS: '/S /K "git status"'
+      }
     });
   });
 
@@ -61,10 +71,8 @@ describe('buildLaunchCommandForPlatform', () => {
       )
     );
 
-    expect(command.executable).toBe(
-      'start "" cmd.exe /C "cd /d "C:\\Notes" && explorer.exe ."'
-    );
-    expect(command.shell).toBe(true);
+    expect(command.env?.TERMINAL_COMMANDS_ARGS).toBe('/S /C "explorer.exe ."');
+    expect(command.shell).toBeUndefined();
   });
 
   it('escapes apostrophes in PowerShell paths', () => {
@@ -72,11 +80,11 @@ describe('buildLaunchCommandForPlatform', () => {
       buildLaunchCommandForPlatform('windows', 'PowerShell', "C:\\Wu's Vault", 'git pull')
     );
 
-    expect(command.executable).toBe(
-      'start "" PowerShell -NoExit -Command "Set-Location -LiteralPath \'C:\\Wu\'\'s Vault\'; git pull"'
+    expect(command.env?.TERMINAL_COMMANDS_APP).toBe('"PowerShell"');
+    expect(command.env?.TERMINAL_COMMANDS_ARGS).toMatch(/^-NoExit -EncodedCommand [A-Za-z0-9+/=]+$/);
+    expect(decodePowerShellCommand(command)).toBe(
+      "Set-Location -LiteralPath 'C:\\Wu''s Vault'; git pull"
     );
-    expect(command.args).toEqual([]);
-    expect(command.shell).toBe(true);
   });
 
   it('omits PowerShell -NoExit when the terminal should close', () => {
@@ -86,9 +94,8 @@ describe('buildLaunchCommandForPlatform', () => {
       })
     );
 
-    expect(command.executable).toBe(
-      'start "" PowerShell -Command "Set-Location -LiteralPath \'C:\\Vault\'; git pull"'
-    );
+    expect(command.env?.TERMINAL_COMMANDS_ARGS).toMatch(/^-EncodedCommand /);
+    expect(decodePowerShellCommand(command)).toBe("Set-Location -LiteralPath 'C:\\Vault'; git pull");
   });
 
   it('uses the configured PowerShell 7 executable instead of falling back to cmd', () => {
@@ -101,10 +108,27 @@ describe('buildLaunchCommandForPlatform', () => {
       )
     );
 
-    expect(command.executable).toBe(
-      'start "" "C:\\Program Files\\PowerShell\\7\\pwsh.exe" -NoExit -Command "Set-Location -LiteralPath \'C:\\Vault\'; git pull"'
+    expect(command.env?.TERMINAL_COMMANDS_APP).toBe('"C:\\Program Files\\PowerShell\\7\\pwsh.exe"');
+    expect(decodePowerShellCommand(command)).toBe("Set-Location -LiteralPath 'C:\\Vault'; git pull");
+  });
+
+  it('keeps an empty cmd terminal open without embedding a working-directory command', () => {
+    const command = requireLaunchCommand(
+      buildLaunchCommandForPlatform('windows', 'cmd.exe', 'C:\\%USERPROFILE% & notes')
     );
-    expect(command.executable).not.toContain('cmd.exe');
+    expect(command.env?.TERMINAL_COMMANDS_ARGS).toBe('/S /K');
+    expect(command.cwd).toBe('C:\\%USERPROFILE% & notes');
+  });
+
+  it('preserves PowerShell syntax and Unicode in the encoded body', () => {
+    const command = requireLaunchCommand(buildLaunchCommandForPlatform(
+      'windows', 'pwsh.exe', "C:\\笔记 & %USERPROFILE%\\Wu's Vault",
+      'Write-Output "中文 & %PATH%"; Write-Output \'$HOME\''
+    ));
+    expect(decodePowerShellCommand(command)).toBe(
+      "Set-Location -LiteralPath 'C:\\笔记 & %USERPROFILE%\\Wu''s Vault'; " +
+      'Write-Output "中文 & %PATH%"; Write-Output \'$HOME\''
+    );
   });
 
   it('rejects Windows Terminal instead of falling back to cmd.exe', () => {

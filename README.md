@@ -27,7 +27,6 @@ New installations include editable entries for:
 - Antigravity
 - OpenCode
 - Git pull
-- Git commit and push
 - Visual Studio Code (`code .`, second to last on Windows)
 - File Explorer (`explorer .`, last on Windows only)
 
@@ -50,6 +49,8 @@ The settings page contains:
   - **Note folder** toggle — on uses the active note's folder; off uses the Vault root
   - **Keep open** toggle — on keeps the terminal open; off closes it when the command finishes
   - Delete button
+
+The **Restore defaults** button beside the Commands add button replaces the entire command list with the current platform's initial commands after confirmation. Custom commands and edits are removed, including changes to names, shell commands, order, working folders, and Keep open preferences. Restored commands use the first current terminal; terminal profiles and other settings are unchanged.
 
 The list includes aligned column headings for all seven controls. Terminal selectors have a fixed width; names longer than eight characters are shortened in the list and remain available as a tooltip. The ribbon command menu shows the selected terminal first, followed by separate **Vault folder** / **Note folder** and **Keep terminal** / **Close terminal** labels, and sorts commands that keep the terminal open before commands that close it.
 

@@ -24,10 +24,14 @@ describe('command list chrome', () => {
     expect(source).toContain("if (this.plugin.settings.terminals.length <= 1)");
     expect(source).toContain(".setButtonText('Restore defaults')");
     expect(source).toContain('class ConfirmModal extends Modal');
-    expect(source.match(/new ConfirmModal/g)).toHaveLength(3);
+    expect(source.match(/new ConfirmModal/g)).toHaveLength(4);
     expect(source).not.toContain('class DeleteItemModal');
     expect(source).not.toContain('class RestoreTerminalsModal');
     expect(source).toContain('restoreDefaultTerminalProfiles(this.plugin.settings)');
+    expect(source).toContain('restoreDefaultCommands(this.plugin.settings)');
+    expect(source).toContain("'terminal-commands-restore-commands'");
+    expect(source).toContain("'terminal-commands-restore-terminals'");
+    expect(source).toContain('private renderRestoreButton(');
     expect(source).toContain("'--dropdown-fitted-width': TERMINAL_DROPDOWN_WIDTH");
     expect(source).toContain("text.setValue('').setDisabled(true)");
     expect(source).toContain('private getTerminalGroupDescription(): string');

@@ -209,13 +209,13 @@ const buildDefaultWindowsPowerShellProfile = () => ({
 const createDefaultTerminalProfiles = () => obsidian.Platform.isWin
     ? [buildDefaultTerminalProfile(), buildDefaultWindowsPowerShellProfile()]
     : [buildDefaultTerminalProfile()];
-const cloneDefaultCommands = () => {
+const cloneDefaultCommands = (terminalId = INITIAL_TERMINAL_ID) => {
     const commands = obsidian.Platform.isWin
         ? [...DEFAULT_COMMANDS, ...WINDOWS_DEFAULT_COMMANDS]
         : DEFAULT_COMMANDS;
     return commands.map((command) => ({
         ...command,
-        terminalId: INITIAL_TERMINAL_ID
+        terminalId
     }));
 };
 const DEFAULT_SETTINGS = {
@@ -293,10 +293,7 @@ const normalizeTerminalProfiles = (value, legacyTerminalApp) => {
 };
 const normalizeCommands = (value, terminalIds, fallbackTerminalId) => {
     if (!Array.isArray(value)) {
-        return cloneDefaultCommands().map((command) => ({
-            ...command,
-            terminalId: fallbackTerminalId
-        }));
+        return cloneDefaultCommands(fallbackTerminalId);
     }
     const usedIds = new Set();
     const commands = [];
@@ -405,6 +402,9 @@ const normalizeSettings = (stored) => {
         reuseExistingMacApp: readBoolean(source.reuseExistingMacApp, DEFAULT_SETTINGS.reuseExistingMacApp),
         commands
     };
+};
+const restoreDefaultCommands = (settings) => {
+    settings.commands = cloneDefaultCommands(settings.terminals[0].id);
 };
 const restoreDefaultTerminalProfiles = (settings) => {
     const defaultTerminals = createDefaultTerminalProfiles();
@@ -542,7 +542,6 @@ const sanitizeTerminalApp = (value) => value.trim();
 const quotePosix = (value) => `'${value.replace(/'/g, `'"'"'`)}'`;
 const quoteCmdPath = (value) => `"${value.replace(/"/g, '""')}"`;
 const quotePowerShellPath = (value) => `'${value.replace(/'/g, "''")}'`;
-const quoteWindowsExecutable = (value) => /[\s&(){}^=;!'+,`~]/.test(value) ? quoteCmdPath(value) : value;
 const getWindowsTerminalKind = (value) => {
     const executableName = node_path.win32.basename(sanitizeTerminalApp(value)).toLowerCase();
     if (executableName === 'cmd' || executableName === 'cmd.exe') {
@@ -611,27 +610,32 @@ const buildWindowsLaunch = (terminalApp, vaultPath, toolCommand, options) => {
     if (!terminalKind) {
         return null;
     }
-    const executable = quoteWindowsExecutable(app);
-    const cmdBody = `cd /d ${quoteCmdPath(vaultPath)}${toolCommand ? ` && ${toolCommand}` : ''}`;
-    const cmdMode = options?.keepTerminalOpen === false ? '/C' : '/K';
+    let terminalArguments;
     if (terminalKind === 'cmd') {
-        return {
-            executable: `start "" ${executable} ${cmdMode} "${cmdBody}"`,
-            args: [],
-            cwd: vaultPath,
-            shell: true
-        };
+        const cmdMode = options?.keepTerminalOpen === false ? '/C' : '/K';
+        // The new terminal inherits cwd; embedding a cd command would expand % in paths.
+        terminalArguments = `/S ${cmdMode}${toolCommand ? ` "${toolCommand}"` : ''}`;
     }
-    if (terminalKind === 'powershell' || terminalKind === 'pwsh') {
+    else {
         const powerShellBody = `Set-Location -LiteralPath ${quotePowerShellPath(vaultPath)}${toolCommand ? `; ${toolCommand}` : ''}`;
-        return {
-            executable: `start "" ${executable}${options?.keepTerminalOpen === false ? '' : ' -NoExit'} -Command "${powerShellBody}"`,
-            args: [],
-            cwd: vaultPath,
-            shell: true
-        };
+        const encodedCommand = Buffer.from(powerShellBody, 'utf16le').toString('base64');
+        terminalArguments = `${options?.keepTerminalOpen === false ? '' : '-NoExit '}-EncodedCommand ${encodedCommand}`;
     }
-    return null;
+    // Late expansion carries paths, quotes and metacharacters past the outer CMD parser.
+    // Verbatim arguments keep Node from adding C-runtime escaping to this CMD command line.
+    return {
+        executable: 'cmd.exe',
+        args: [
+            '/D', '/V:ON', '/S', '/C',
+            '"start "" !TERMINAL_COMMANDS_APP! !TERMINAL_COMMANDS_ARGS!"'
+        ],
+        cwd: vaultPath,
+        windowsVerbatimArguments: true,
+        env: {
+            TERMINAL_COMMANDS_APP: quoteCmdPath(app),
+            TERMINAL_COMMANDS_ARGS: terminalArguments
+        }
+    };
 };
 const buildUnixLaunch = (terminalApp, vaultPath, toolCommand, options) => {
     const app = sanitizeTerminalApp(terminalApp);
@@ -1028,6 +1032,17 @@ class TerminalCommandsSettingTab extends obsidian.PluginSettingTab {
             }
         }).open();
     }
+    confirmRestoreCommands() {
+        new ConfirmModal(this.app, {
+            title: 'Restore default commands',
+            message: 'Replace the command list with the platform defaults? Custom commands and edits will be removed. Restored commands will use the first current terminal; the terminal list will not change. This action cannot be undone.',
+            confirmLabel: 'Restore',
+            onConfirm: () => {
+                restoreDefaultCommands(this.plugin.settings);
+                void this.saveImmediately().then(() => this.update());
+            }
+        }).open();
+    }
     getTerminalLabel(terminal, index) {
         return terminal.name.trim() || `Terminal ${index + 1}`;
     }
@@ -1062,16 +1077,7 @@ class TerminalCommandsSettingTab extends obsidian.PluginSettingTab {
     addCommandListChrome() {
         const terminalGroupEl = this.containerEl.querySelector('.terminal-commands-terminals-list');
         const terminalHeadingEl = terminalGroupEl?.querySelector('.setting-item-heading');
-        const terminalHeadingControlsEl = terminalHeadingEl?.querySelector('.setting-item-control');
-        if (terminalHeadingControlsEl &&
-            !terminalHeadingControlsEl.querySelector('.terminal-commands-restore-terminals')) {
-            const restoreButton = new obsidian.ButtonComponent(terminalHeadingControlsEl)
-                .setButtonText('Restore defaults')
-                .setTooltip('Restore the platform default terminal list')
-                .setClass('terminal-commands-restore-terminals')
-                .onClick(() => this.confirmRestoreTerminals());
-            terminalHeadingControlsEl.prepend(restoreButton.buttonEl);
-        }
+        this.renderRestoreButton(terminalHeadingEl, 'terminal-commands-restore-terminals', 'Restore the platform default terminal list', () => this.confirmRestoreTerminals());
         if (terminalGroupEl &&
             terminalHeadingEl &&
             !terminalGroupEl.querySelector('.terminal-commands-group-description')) {
@@ -1087,6 +1093,7 @@ class TerminalCommandsSettingTab extends obsidian.PluginSettingTab {
             return;
         }
         const headingEl = groupEl.querySelector('.setting-item-heading');
+        this.renderRestoreButton(headingEl, 'terminal-commands-restore-commands', 'Restore the platform default command list', () => this.confirmRestoreCommands());
         if (headingEl && !groupEl.querySelector('.terminal-commands-group-description')) {
             const descriptionEl = groupEl.createDiv({
                 cls: 'terminal-commands-group-description'
@@ -1100,6 +1107,19 @@ class TerminalCommandsSettingTab extends obsidian.PluginSettingTab {
             headingEl.after(descriptionEl);
         }
         this.renderColumnHeaders(groupEl.querySelector('.setting-items'), 'terminal-commands-column-headers', COMMAND_COLUMN_HEADERS);
+    }
+    renderRestoreButton(headingEl, className, tooltip, onRestore) {
+        const controlsEl = headingEl?.querySelector('.setting-item-control');
+        if (!controlsEl || controlsEl.querySelector(`.${className}`)) {
+            return;
+        }
+        const button = new obsidian.ButtonComponent(controlsEl)
+            .setButtonText('Restore defaults')
+            .setTooltip(tooltip)
+            .setClass(className)
+            .onClick(onRestore);
+        button.buttonEl.addClass('terminal-commands-restore-defaults');
+        controlsEl.prepend(button.buttonEl);
     }
     renderColumnHeaders(listEl, className, columns) {
         if (!listEl || listEl.querySelector(`.${className}`)) {
@@ -1158,7 +1178,9 @@ class TerminalCommandsSettingTab extends obsidian.PluginSettingTab {
 
 const TEMP_SCRIPT_CLEANUP_DELAY_MS = 30_000;
 class TerminalCommandsPlugin extends obsidian.Plugin {
-    registeredCommandIds = new Set();
+    registeredCommandNames = new Map();
+    saveQueue = Promise.resolve();
+    isUnloading = false;
     settings = { ...DEFAULT_SETTINGS };
     async onload() {
         await this.loadSettings();
@@ -1172,32 +1194,49 @@ class TerminalCommandsPlugin extends obsidian.Plugin {
     }
     openCommandMenu() {
         const menu = new TerminalCommandMenu(this.app, buildLaunchTargets(this.settings), (target) => {
-            this.launchTarget(target);
+            this.launchTarget(target.id);
         });
         menu.open();
     }
+    onunload() {
+        this.isUnloading = true;
+    }
     refreshCommands() {
-        const commandManager = resolveCommandManager(this.app);
-        if (commandManager) {
-            for (const fullId of this.registeredCommandIds) {
-                if (commandManager.findCommand(fullId)) {
-                    commandManager.removeCommand(fullId);
-                }
-            }
+        if (this.isUnloading) {
+            return;
         }
-        this.registeredCommandIds.clear();
-        for (const target of buildLaunchTargets(this.settings)) {
+        const targets = buildLaunchTargets(this.settings);
+        const nextNames = new Map(targets.map((target) => [target.id, target.commandName]));
+        const commandManager = resolveCommandManager(this.app);
+        for (const [id, name] of this.registeredCommandNames) {
+            if (nextNames.get(id) === name) {
+                continue;
+            }
+            const fullId = `${this.manifest.id}:${id}`;
+            if (commandManager?.findCommand(fullId)) {
+                commandManager.removeCommand(fullId);
+            }
+            this.registeredCommandNames.delete(id);
+        }
+        for (const target of targets) {
+            const id = target.id;
+            if (this.registeredCommandNames.has(id)) {
+                continue;
+            }
             this.addCommand({
-                id: target.id,
+                id,
                 name: target.commandName,
-                callback: () => {
-                    this.launchTarget(target);
-                }
+                callback: () => this.launchTarget(id)
             });
-            this.registeredCommandIds.add(`${this.manifest.id}:${target.id}`);
+            this.registeredCommandNames.set(id, target.commandName);
         }
     }
-    launchTarget(target) {
+    launchTarget(id) {
+        // Settings can change while a menu entry or a debounced save is pending.
+        const target = buildLaunchTargets(this.settings).find((item) => item.id === id);
+        if (!target) {
+            return;
+        }
         this.runLaunchCommand(() => this.composeLaunchCommand(target.toolCommand, target.workingDirectory, target.keepTerminalOpen, target.terminalId), target.commandName);
     }
     composeLaunchCommand(toolCommand, workingDirectory = 'vault', keepTerminalOpen = true, terminalId = this.settings.terminals[0]?.id ?? '') {
@@ -1238,6 +1277,8 @@ class TerminalCommandsPlugin extends obsidian.Plugin {
             const child = node_child_process.spawn(launchCommand.executable, launchCommand.args, {
                 cwd: launchCommand.cwd,
                 shell: launchCommand.shell ?? false,
+                env: { ...process.env, ...launchCommand.env },
+                windowsVerbatimArguments: launchCommand.windowsVerbatimArguments,
                 detached: true,
                 stdio: 'ignore'
             });
@@ -1271,8 +1312,12 @@ class TerminalCommandsPlugin extends obsidian.Plugin {
         this.settings = normalizeSettings(await this.loadData());
     }
     async saveSettings() {
-        await this.saveData(this.settings);
         this.refreshCommands();
+        const snapshot = structuredClone(this.settings);
+        const write = () => this.saveData(snapshot);
+        // Each caller receives its write failure; later saves may still proceed.
+        this.saveQueue = this.saveQueue.then(write, write);
+        return this.saveQueue;
     }
 }
 
